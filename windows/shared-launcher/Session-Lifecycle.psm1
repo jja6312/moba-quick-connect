@@ -1,0 +1,132 @@
+Set-StrictMode -Version Latest
+
+function Get-MobaFileHash([string]$Path) {
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try {return [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path))).Replace('-','').ToLowerInvariant()}
+    finally {$sha.Dispose()}
+}
+
+function Enter-MobaRunLock([string]$Directory) {
+    [IO.Directory]::CreateDirectory($Directory)|Out-Null
+    try {return [IO.File]::Open((Join-Path $Directory 'session-run.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
+    catch [IO.IOException] {throw 'The shared-session launcher is still saving or starting. Try again in a moment.'}
+}
+
+function Test-MobaPublisherCommand([string]$CommandLine,[string]$LauncherPath) {
+    if(-not $CommandLine){return $false}
+    $leaf=[IO.Path]::GetFileName($LauncherPath)
+    $mentions=($CommandLine.IndexOf($leaf,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $CommandLine.IndexOf('Start-MobaXterm-Installed.ps1',[StringComparison]::OrdinalIgnoreCase) -ge 0)
+    if(-not $mentions){return $false}
+    $argument=[regex]::Match($CommandLine,'(?i)(?:^|\s)-(?:f|fi|fil|file)\s+(?:"(?<path>[^"]+)"|(?<path>[^\s]+))')
+    if(-not $argument.Success){return $true} # Inline/wrapper invocation: ambiguous ownership blocks recovery.
+    $path=$argument.Groups['path'].Value
+    try {
+        if([IO.Path]::IsPathRooted($path)){
+            if([string]::Equals([IO.Path]::GetFullPath($path),[IO.Path]::GetFullPath($LauncherPath),[StringComparison]::OrdinalIgnoreCase)){return $true}
+        }
+    }catch{return $true}
+    # CIM does not expose a process current directory. A relative invocation or
+    # another shared-launcher wrapper mentioning this script is fail-closed.
+    return $true
+}
+
+function Get-MobaOwners([string]$LauncherPath) {
+    # Import the Windows-native CIM module, avoiding inherited PowerShell 7 paths.
+    if($PSVersionTable.PSVersion.Major -eq 5){
+        $module=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules\CimCmdlets\CimCmdlets.psd1'
+        Import-Module $module -ErrorAction Stop
+    }
+    $all=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $ancestors=@{};$cursor=[int]$PID
+    while($cursor -gt 0 -and -not $ancestors.ContainsKey($cursor)){
+        $ancestors[$cursor]=$true
+        $entry=@($all|Where-Object {[int]$_.ProcessId -eq $cursor})
+        if(-not $entry.Count){break};$cursor=[int]$entry[0].ParentProcessId
+    }
+    $apps=@($all|Where-Object {$_.Name -like 'MobaXterm*'})
+    $workers=@($all|Where-Object {
+        -not $ancestors.ContainsKey([int]$_.ProcessId) -and $_.Name -match '^(powershell|pwsh)\.exe$' -and
+        (Test-MobaPublisherCommand ([string]$_.CommandLine) $LauncherPath)
+    })
+    return [pscustomobject]@{Apps=$apps.Count;Publishers=$workers.Count}
+}
+
+function Write-MobaLifecycle([string]$Directory,[string]$Event,[hashtable]$Details=@{}) {
+    $record=@{utc=[DateTime]::UtcNow.ToString('o');event=$Event;publisherPid=$PID}
+    foreach($key in $Details.Keys){$record[$key]=$Details[$key]}
+    [IO.File]::AppendAllText((Join-Path $Directory 'lifecycle.jsonl'),($record|ConvertTo-Json -Depth 4 -Compress)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+}
+
+function Test-MobaRecordedOwner($Record) {
+    if(-not $Record.PSObject.Properties['PublisherPid']){return $false}
+    if(-not $Record.PSObject.Properties['PublisherStartedUtc']){throw 'Incomplete publisher identity. Pending edit was preserved.'}
+    if([string]$Record.PublisherPid -notmatch '^[1-9][0-9]*$'){throw 'Invalid publisher identity. Pending edit was preserved.'}
+    try {$owner=[Diagnostics.Process]::GetProcessById([int]$Record.PublisherPid)}catch [ArgumentException]{return $false}
+    try {
+        $expected=[DateTime]::Parse([string]$Record.PublisherStartedUtc).ToUniversalTime()
+        return [Math]::Abs(($owner.StartTime.ToUniversalTime()-$expected).TotalSeconds) -lt 1
+    }finally {$owner.Dispose()}
+}
+
+function Assert-MobaPendingRecord($Record) {
+    if($null -eq $Record -or $Record -isnot [pscustomobject]){throw 'Unknown pending edit was preserved for recovery.'}
+    $fields=@($Record.PSObject.Properties.Name)
+    if($fields -contains 'Schema'){
+        if($Record.Schema -isnot [int] -or $Record.Schema -ne 2){throw 'Unsupported pending schema was preserved for recovery.'}
+        foreach($name in @('RunId','PublisherPid','PublisherStartedUtc')){
+            if(-not $Record.PSObject.Properties[$name]){throw 'Incomplete publisher identity was preserved.'}
+        }
+        if([string]$Record.RunId -cnotmatch '^[0-9a-f]{32}$' -or [string]$Record.PublisherPid -notmatch '^[1-9][0-9]*$'){throw 'Invalid publisher identity was preserved.'}
+        try{$null=[DateTime]::Parse([string]$Record.PublisherStartedUtc)}catch{throw 'Invalid publisher timestamp was preserved.'}
+    }else{
+        if($fields.Count -ne 3 -or @($fields|Where-Object {$_ -notin @('SourceHash','InitialViewHash','CreatedUtc')}).Count){throw 'Unknown legacy pending edit was preserved for recovery.'}
+    }
+    foreach($name in @('SourceHash','InitialViewHash')){
+        if(-not $Record.PSObject.Properties[$name] -or [string]$Record.$name -cnotmatch '^[0-9a-fA-F]{64}$'){throw 'Invalid pending edit was preserved for recovery.'}
+    }
+    if(-not $Record.PSObject.Properties['CreatedUtc']){throw 'Unknown pending edit was preserved for recovery.'}
+    try{$null=[DateTime]::Parse([string]$Record.CreatedUtc)}catch{throw 'Invalid pending timestamp was preserved.'}
+}
+
+function Recover-MobaUnchangedPending {
+    param([string]$Directory,[string]$Source,[string]$LauncherPath,[scriptblock]$OwnerProbe,
+          [scriptblock]$BeforeRecheck)
+    # Caller holds session-run.lock for this whole operation and the ensuing run.
+    $pending=Join-Path $Directory 'pending-edit.json'
+    if(-not [IO.File]::Exists($pending)){return $null}
+    $view=Join-Path $Directory 'sessions-local.mxtsessions';$ini=Join-Path $Directory 'MobaXterm.ini'
+    $probe={Get-MobaOwners $LauncherPath}
+    if($OwnerProbe){$probe=$OwnerProbe}
+    $owners=& $probe
+    if($owners.Apps -or $owners.Publishers){throw 'A MobaXterm application or publisher is active. Pending edit was preserved.'}
+    $before=@{}
+    foreach($file in @($pending,$view,$ini,$Source)){$before[$file]=Get-MobaFileHash $file}
+    try {$record=[IO.File]::ReadAllText($pending)|ConvertFrom-Json}catch{throw 'Unreadable pending edit was preserved for recovery.'}
+    Assert-MobaPendingRecord $record
+    if(Test-MobaRecordedOwner $record){throw 'The recorded publisher is still active. Pending edit was preserved.'}
+    if($before[$view] -cne ([string]$record.InitialViewHash).ToLowerInvariant()){
+        throw 'Unpublished session edits were preserved. Review the local view before recovery.'
+    }
+    $root=[IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    $archive=[IO.Path]::GetFullPath((Join-Path $root ('recovery\unchanged-'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')+'-'+[Guid]::NewGuid().ToString('N'))))
+    if(-not $archive.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Recovery path escaped its device directory.'}
+    [IO.Directory]::CreateDirectory($archive)|Out-Null
+    foreach($file in @($pending,$view,$ini)){
+        $backup=Join-Path $archive ([IO.Path]::GetFileName($file)+'.before')
+        [IO.File]::Copy($file,$backup,$false)
+        if((Get-MobaFileHash $backup) -cne $before[$file]){throw 'Backup mismatch. Pending edit was preserved.'}
+    }
+    if($BeforeRecheck){& $BeforeRecheck}
+    $owners=& $probe
+    if($owners.Apps -or $owners.Publishers -or (Test-MobaRecordedOwner $record)){throw 'A writer became active. Pending edit was preserved.'}
+    foreach($file in @($pending,$view,$ini,$Source)){
+        if((Get-MobaFileHash $file) -cne $before[$file]){throw 'Files changed during recovery. Pending edit was preserved.'}
+    }
+    $destination=Join-Path $archive 'pending-edit.recovered.json'
+    [IO.File]::Move($pending,$destination)
+    if((Get-MobaFileHash $destination) -cne $before[$pending]){throw 'Archived pending checksum mismatch.'}
+    Write-MobaLifecycle $Directory 'unchanged-pending-archived' @{archive=[IO.Path]::GetFileName($archive);sourceChanged=($before[$Source] -cne ([string]$record.SourceHash).ToLowerInvariant())}
+    return $archive
+}
+
+Export-ModuleMember -Function Get-MobaFileHash,Enter-MobaRunLock,Get-MobaOwners,Write-MobaLifecycle,Recover-MobaUnchangedPending,Test-MobaPublisherCommand
