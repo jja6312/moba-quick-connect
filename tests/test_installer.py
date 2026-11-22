@@ -46,7 +46,7 @@ class InstallerTests(unittest.TestCase):
         script = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);. ' + quote(ROOT / 'windows/Install.Core.ps1')
         script += ';try{$r=Install-MobaQuickConnect -Payload ([IO.File]::ReadAllBytes(' + quote(payload) + ')) -ExpectedHash ' + quote(digest)
         script += ' -LocalData ' + quote(self.local) + ' -MenuDirectory ' + quote(self.menu) + ' -StartupDirectory ' + quote(self.startup) + ' -NoLaunch;'
-        script += "Write-Output ('RESULT:'+(@{ok=$true;result=$r}|ConvertTo-Json -Compress))}catch{Write-Output ('RESULT:'+(@{ok=$false;error=$_.Exception.Message}|ConvertTo-Json -Compress))}"
+        script += "Write-Output ('RESULT:'+(@{ok=$true;result=$r}|ConvertTo-Json -Compress))}catch{Write-Output ('RESULT:'+(@{ok=$false;error=$_.Exception.Message;stack=$_.ScriptStackTrace;errorId=$_.FullyQualifiedErrorId}|ConvertTo-Json -Compress))}"
         return self.invoke(script)
 
     def startup_action(self, action):
