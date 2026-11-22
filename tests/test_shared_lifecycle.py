@@ -141,8 +141,8 @@ class LifecycleTests(unittest.TestCase):
             '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);& '+q(app/'Start-MobaXterm.ps1')+' -ValidateOnly 3>$null'],
             env={**os.environ,'LOCALAPPDATA':str(local)},capture_output=True,timeout=30)
         self.assertEqual(probe.returncode,0,probe.stderr.decode(errors='replace'))
-        device=Path(json.loads(probe.stdout.decode('utf-8-sig'))['DeviceDirectory'])
-        self.assertTrue(device.is_relative_to(local.resolve()),'Fixture escaped its isolated local data')
+        device=Path(json.loads(probe.stdout.decode('utf-8-sig'))['DeviceDirectory']).resolve()
+        self.assertTrue(device.is_relative_to(local.resolve()),f'Fixture {device} escaped isolated data {local.resolve()}')
         device.mkdir(parents=True)
         shutil.copy2(app/'MobaXterm.ini',device/'MobaXterm.ini')
         (device/'sessions-local.mxtsessions').write_bytes(canonical.read_bytes())
