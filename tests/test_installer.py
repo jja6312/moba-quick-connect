@@ -91,8 +91,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_unrelated_startup_link_is_not_removed(self):
         self.assertTrue(self.install()['ok'])
-        script = '$s=New-Object -ComObject WScript.Shell;$l=$s.CreateShortcut(' + quote(self.startup / 'Moba Quick Connect.lnk') + ");$l.TargetPath='C:\\Windows\\notepad.exe';$l.Save();Write-Output 'RESULT:{\"ok\":true}'"
+        script = '. ' + quote(ROOT / 'windows/Shortcuts.ps1') + ';[Cloudragon.Moba.Shortcuts]::Save(' + quote(self.startup / 'Moba Quick Connect.lnk') + ',' + quote(Path(os.environ['WINDIR']) / 'System32/cmd.exe') + ",'','','unrelated fixture',1);Write-Output 'RESULT:{\"ok\":true}'"
         self.invoke(script)
+        self.assertTrue((self.startup / 'Moba Quick Connect.lnk').exists())
         self.assertFalse(self.startup_action('Disable')['ok'])
         self.assertTrue((self.startup / 'Moba Quick Connect.lnk').exists())
 
