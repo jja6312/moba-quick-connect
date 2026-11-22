@@ -132,8 +132,18 @@ class LifecycleTests(unittest.TestCase):
         canonical=app.parent/'mobaxterm-sessions.mxtsessions';canonical.write_bytes(self.source.read_bytes())
         (app.parent/'portable-keys.json').write_text('{"schema":1,"aliases":{}}')
         (app/'MobaXterm.ini').write_bytes(b'[Misc]\r\nHomeDir=old\r\nAutoRefreshSharedSessions=0\r\n[SharedSessions0]\r\nFilePath=old\r\n')
-        local=self.base/'local-data';ns=hashlib.sha256(str(sync).lower().encode()).hexdigest()[:16]
-        device=local/'MobaXtermPortable'/ns;device.mkdir(parents=True)
+        local=self.base/'local-data'
+        # PowerShell resolves the script root through its Windows provider. A
+        # runner's short-name/junction path can differ from Python's spelling.
+        # Ask the read-only launcher for its device directory instead of
+        # reproducing its namespace calculation with a different path spelling.
+        probe=subprocess.run([PS,'-NoLogo','-NoProfile','-Command',
+            '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);& '+q(app/'Start-MobaXterm.ps1')+' -ValidateOnly 3>$null'],
+            env={**os.environ,'LOCALAPPDATA':str(local)},capture_output=True,timeout=30)
+        self.assertEqual(probe.returncode,0,probe.stderr.decode(errors='replace'))
+        device=Path(json.loads(probe.stdout.decode('utf-8-sig'))['DeviceDirectory'])
+        self.assertTrue(device.is_relative_to(local.resolve()),'Fixture escaped its isolated local data')
+        device.mkdir(parents=True)
         shutil.copy2(app/'MobaXterm.ini',device/'MobaXterm.ini')
         (device/'sessions-local.mxtsessions').write_bytes(canonical.read_bytes())
         (device/'pending-edit.json').write_text(json.dumps(self.record))
@@ -147,7 +157,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
         self.assertEqual({p:p.read_bytes() for p in device.iterdir()},before)
         result=subprocess.run([PS,'-NoLogo','-NoProfile','-File',str(app/'Start-MobaXterm.ps1'),'-PrepareOnly'],env=env,capture_output=True,timeout=30)
-        self.assertNotEqual(result.returncode,0)
+        self.assertNotEqual(result.returncode,0,result.stdout.decode(errors='replace'))
         for p,content in before.items():self.assertEqual(p.read_bytes(),content)
 
     def test_real_launcher_recovers_then_completes_an_owned_synthetic_process(self):
@@ -155,7 +165,7 @@ class LifecycleTests(unittest.TestCase):
         shutil.copy2(Path(os.environ['WINDIR'])/'System32/where.exe',app/'MobaXterm_Test.exe')
         result=subprocess.run([PS,'-NoLogo','-NoProfile','-File',str(app/'Start-MobaXterm.ps1'),'-NoDialogs'],env={**os.environ,'LOCALAPPDATA':str(local)},capture_output=True,timeout=30)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
-        self.assertFalse((device/'pending-edit.json').exists())
+        self.assertFalse((device/'pending-edit.json').exists(),result.stdout.decode(errors='replace'))
         self.assertEqual(canonical.read_bytes(),self.source.read_bytes())
         events=[json.loads(line)['event'] for line in (device/'lifecycle.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(events,['unchanged-pending-archived','run-started','application-started','application-exited','run-completed'])
