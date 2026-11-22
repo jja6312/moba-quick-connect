@@ -66,7 +66,11 @@ function Install-MobaQuickConnect {
         $shell=New-Object -ComObject WScript.Shell
         if(Test-Path -LiteralPath $menuLink){if(-not $shell.CreateShortcut($menuLink).TargetPath.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unrelated Start Menu shortcut preserved.'}}
         [IO.Directory]::CreateDirectory($MenuDirectory)|Out-Null
-        $shortcut=$shell.CreateShortcut($menuLink);$shortcut.TargetPath=$exe;$shortcut.WorkingDirectory=$destination;$shortcut.Description='Moba Quick Connect';$shortcut.Save()
+        $shortcut=$shell.CreateShortcut($menuLink)
+        $shortcut.TargetPath=$exe
+        $shortcut.WorkingDirectory=$destination
+        $shortcut.Description='Moba Quick Connect'
+        $shortcut.Save()
         if(Test-Path -LiteralPath (Join-Path $StartupDirectory 'Moba Quick Connect.lnk')){
             & (Join-Path $destination 'AutoStart.ps1') -Action Enable -LocalData $LocalData -StartupDirectory $StartupDirectory
         }
