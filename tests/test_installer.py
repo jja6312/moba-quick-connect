@@ -35,7 +35,9 @@ class InstallerTests(unittest.TestCase):
         return json.loads(next(line[7:] for line in out.splitlines() if line.startswith('RESULT:')))
 
     def install(self, extra=None, expected=None):
-        data = {'app/MobaQuickConnect.exe': b'not-an-executable-test-only', 'app/version.txt': b'1.3.0',
+        # ShellLink on Windows Server validates executable metadata. Use an OS
+        # PE file as fixture bytes and always suppress application launch.
+        data = {'app/MobaQuickConnect.exe': (Path(os.environ['WINDIR']) / 'System32/where.exe').read_bytes(), 'app/version.txt': b'1.3.0',
                 'app/AutoStart.ps1': (ROOT / 'windows/AutoStart.ps1').read_bytes()}
         data.update(extra or {})
         buf = io.BytesIO()
