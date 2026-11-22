@@ -24,7 +24,7 @@ function Install-MobaQuickConnect {
             $names[$name]=$true
         }
     }finally{$zip.Dispose();$memory.Dispose()}
-    foreach($required in @('app/MobaQuickConnect.exe','app/AutoStart.ps1')){if(-not $names.ContainsKey($required)){throw 'Incomplete package.'}}
+    foreach($required in @('app/MobaQuickConnect.exe','app/AutoStart.ps1','app/Shortcuts.ps1')){if(-not $names.ContainsKey($required)){throw 'Incomplete package.'}}
     $parent=Join-Path ([IO.Path]::GetFullPath($LocalData)) 'Cloudragon'
     $root=Join-Path $parent 'MobaQuickConnect'
     foreach($dir in @($parent,$root)){
@@ -63,14 +63,10 @@ function Install-MobaQuickConnect {
         [IO.File]::WriteAllText($temporary,($next|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
         if([IO.File]::Exists($receiptPath)){[IO.File]::Replace($temporary,$receiptPath,(Join-Path $root ('installation-previous-'+[Guid]::NewGuid().ToString('N')+'.json')))}else{[IO.File]::Move($temporary,$receiptPath)}
         $menuLink=Join-Path $MenuDirectory 'Moba Quick Connect.lnk'
-        $shell=New-Object -ComObject WScript.Shell
-        if(Test-Path -LiteralPath $menuLink){if(-not $shell.CreateShortcut($menuLink).TargetPath.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unrelated Start Menu shortcut preserved.'}}
+        . (Join-Path $destination 'Shortcuts.ps1')
+        if(Test-Path -LiteralPath $menuLink){if(-not [Cloudragon.Moba.Shortcuts]::Read($menuLink)[0].StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unrelated Start Menu shortcut preserved.'}}
         [IO.Directory]::CreateDirectory($MenuDirectory)|Out-Null
-        $shortcut=$shell.CreateShortcut($menuLink)
-        $shortcut.TargetPath=$exe
-        $shortcut.WorkingDirectory=$destination
-        $shortcut.Description='Moba Quick Connect'
-        $shortcut.Save()
+        [Cloudragon.Moba.Shortcuts]::Save($menuLink,$exe,'',$destination,'Moba Quick Connect',1)
         if(Test-Path -LiteralPath (Join-Path $StartupDirectory 'Moba Quick Connect.lnk')){
             & (Join-Path $destination 'AutoStart.ps1') -Action Enable -LocalData $LocalData -StartupDirectory $StartupDirectory
         }

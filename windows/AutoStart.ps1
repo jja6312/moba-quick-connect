@@ -4,10 +4,10 @@ param([ValidateSet('Enable','Disable')][string]$Action, [string]$LocalData=$env:
 $ErrorActionPreference='Stop'
 $root=Join-Path ([IO.Path]::GetFullPath($LocalData)) 'Cloudragon\MobaQuickConnect'
 $link=Join-Path $StartupDirectory 'Moba Quick Connect.lnk'
-$shell=New-Object -ComObject WScript.Shell
+. (Join-Path $PSScriptRoot 'Shortcuts.ps1')
 if(Test-Path -LiteralPath $link){
-    $existing=$shell.CreateShortcut($link)
-    if(-not $existing.TargetPath.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase) -or $existing.Arguments -cne '--hidden'){
+    $existing=[Cloudragon.Moba.Shortcuts]::Read($link)
+    if(-not $existing[0].StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase) -or $existing[1] -cne '--hidden'){
         throw 'An unrelated startup shortcut was preserved.'
     }
 }
@@ -28,11 +28,5 @@ if($actual -cne $receipt.exeSha256){throw 'Installed application checksum change
 foreach($dir in @($root,[IO.Path]::GetDirectoryName($exe),$StartupDirectory)){
     if((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked folder preserved.'}
 }
-$shortcut=$shell.CreateShortcut($link)
-$shortcut.TargetPath=$exe
-$shortcut.Arguments='--hidden'
-$shortcut.WorkingDirectory=[IO.Path]::GetDirectoryName($exe)
-$shortcut.Description='Moba Quick Connect automatic startup'
-$shortcut.WindowStyle=7
-$shortcut.Save()
+[Cloudragon.Moba.Shortcuts]::Save($link,$exe,'--hidden',[IO.Path]::GetDirectoryName($exe),'Moba Quick Connect automatic startup',7)
 Write-Host 'Windows automatic startup is ON. The application will stay in the tray after sign-in.'

@@ -31,6 +31,7 @@ def main():
     exe = ROOT / "dist" / VERSION / "MobaQuickConnect.exe"
     licenses = ROOT / "release-resources" / "THIRD-PARTY-LICENSES.zip"
     entries = {"app/MobaQuickConnect.exe": exe.read_bytes(), "app/AutoStart.ps1": (ROOT / "windows/AutoStart.ps1").read_bytes(),
+        "app/Shortcuts.ps1": (ROOT / "windows/Shortcuts.ps1").read_bytes(),
         "app/version.txt": VERSION.encode(), "app/README.md": (ROOT / "README.md").read_bytes(),
         "app/THIRD_PARTY.txt": (ROOT / "THIRD_PARTY.txt").read_bytes(),
         "app/THIRD-PARTY-LICENSES.zip": licenses.read_bytes(),

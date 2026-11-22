@@ -16,7 +16,7 @@ import uuid
 
 from vendor import mobaxterm_sessions as codec
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 FIELDS = ("host", "protocol", "name", "user", "port", "key_path", "folder",
           "bastion_host", "bastion_user", "bastion_port", "bastion_key_path")
 HEADERS = ("접속 IP", "방식", "연결 이름", "사용자", "포트", "SSH 키 경로", "저장 폴더",

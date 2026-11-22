@@ -38,6 +38,7 @@ class InstallerTests(unittest.TestCase):
         # ShellLink on Windows Server validates executable metadata. Use an OS
         # PE file as fixture bytes and always suppress application launch.
         data = {'app/MobaQuickConnect.exe': (Path(os.environ['WINDIR']) / 'System32/where.exe').read_bytes(), 'app/version.txt': b'1.3.0',
+                'app/Shortcuts.ps1': (ROOT / 'windows/Shortcuts.ps1').read_bytes(),
                 'app/AutoStart.ps1': (ROOT / 'windows/AutoStart.ps1').read_bytes()}
         data.update(extra or {})
         buf = io.BytesIO()
