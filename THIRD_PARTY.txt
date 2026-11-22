@@ -1,0 +1,24 @@
+Moba Quick Connect uses the following separately licensed components.
+
+Python 3.14.7: Python Software Foundation License
+https://docs.python.org/3/license.html
+
+PySide6 Essentials and Shiboken6 6.12.0: LGPLv3/GPLv3/commercial alternatives
+This distribution uses the LGPLv3 option.
+https://doc.qt.io/qtforpython-6/licenses.html
+https://code.qt.io/cgit/pyside/pyside-setup.git/
+
+Qt 6.12.0: applicable Qt LGPLv3 components and included third-party licenses
+https://doc.qt.io/qt-6/licensing.html
+https://code.qt.io/cgit/qt/
+
+PyInstaller 6.22.3: GPL with bootloader distribution exception
+https://pyinstaller.org/en/stable/license.html
+
+psutil 7.2.2: BSD 3-Clause License
+https://github.com/giampaolo/psutil/blob/master/LICENSE
+
+MobaXterm is a separate Mobatek product and is not bundled with this program.
+https://mobaxterm.mobatek.net/
+
+The application source and exact build dependencies are supplied with the release.
