@@ -123,6 +123,7 @@ namespace MobaQuickConnect {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
   [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextLength(IntPtr window);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder title, int capacity);
   [StructLayout(LayoutKind.Sequential)] struct Rect { public int left,top,right,bottom; }
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window,out Rect rectangle);
   public static void ShowProcess(int pid) {
@@ -131,8 +132,16 @@ namespace MobaQuickConnect {
    EnumWindows(delegate(IntPtr window, IntPtr state) {
     uint owner; GetWindowThreadProcessId(window,out owner);
     if(owner==(uint)pid && GetWindow(window,4)==IntPtr.Zero && GetWindowTextLength(window)>0) {
+     StringBuilder title=new StringBuilder(512); GetWindowText(window,title,title.Capacity);
+     // A GDI+ utility surface is never the terminal window. Undo activation by
+     // older window-selection logic without closing the application or sessions.
+     if(title.ToString().StartsWith("GDI+ Window",StringComparison.OrdinalIgnoreCase)) {
+      ShowWindowAsync(window,0); return true;
+     }
+     if(!title.ToString().StartsWith("MobaXterm",StringComparison.OrdinalIgnoreCase)) return true;
      Rect bounds;
      if(GetWindowRect(window,out bounds)) {
+      if(bounds.right-bounds.left<320 || bounds.bottom-bounds.top<160) return true;
       long area=(long)(bounds.right-bounds.left)*(bounds.bottom-bounds.top);
       if(area>bestArea) { bestArea=area; found=window; }
      }
