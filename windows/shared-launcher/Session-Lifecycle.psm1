@@ -117,6 +117,22 @@ namespace MobaQuickConnect {
   [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int command);
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] static extern bool FlashWindow(IntPtr hWnd, bool invert);
+  delegate bool WindowCallback(IntPtr window, IntPtr state);
+  [DllImport("user32.dll")] static extern bool EnumWindows(WindowCallback callback, IntPtr state);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextLength(IntPtr window);
+  public static void ShowProcess(int pid) {
+   IntPtr found=IntPtr.Zero;
+   EnumWindows(delegate(IntPtr window, IntPtr state) {
+    uint owner; GetWindowThreadProcessId(window,out owner);
+    if(owner==(uint)pid && GetWindow(window,4)==IntPtr.Zero && GetWindowTextLength(window)>0) {
+     found=window; return false;
+    }
+    return true;
+   },IntPtr.Zero);
+   if(found!=IntPtr.Zero) Show(found);
+  }
   public static void Show(IntPtr handle) {
    ShowWindowAsync(handle, IsIconic(handle) ? 9 : 5);
    if (!SetForegroundWindow(handle)) FlashWindow(handle, true);
@@ -125,7 +141,7 @@ namespace MobaQuickConnect {
 }
 '@
                 }
-                $windows=@([Diagnostics.Process]::GetProcesses()|Where-Object {$_.ProcessName -like 'MobaXterm*' -and $_.MainWindowHandle -ne [IntPtr]::Zero})
+                $windows=@([Diagnostics.Process]::GetProcesses()|Where-Object {$_.ProcessName -like 'MobaXterm*'})
                 if($IniPath){
                     $matching=@(Get-CimInstance Win32_Process|Where-Object {
                         $m=[regex]::Match([string]$_.CommandLine,'(?i)(?:^|\s)-i\s+(?:"(?<ini>[^"]+)"|(?<ini>[^\s]+))')
@@ -136,7 +152,7 @@ namespace MobaQuickConnect {
                 # Prefer this portable install if several Moba installations run.
                 $preferred=@($windows|Where-Object {try{[IO.Path]::GetDirectoryName($_.MainModule.FileName) -ieq [IO.Path]::GetDirectoryName($LauncherPath)}catch{$false}})
                 if($preferred.Count){$windows=$preferred}
-                if($windows.Count){[MobaQuickConnect.NativeActivation]::Show($windows[0].MainWindowHandle)}
+                if($windows.Count){[MobaQuickConnect.NativeActivation]::ShowProcess($windows[0].Id)}
             }catch{} # Startup/exit races are ordinary second-click conditions.
         }
         Write-MobaActivationEvent $Directory 'existing-application-requested'
