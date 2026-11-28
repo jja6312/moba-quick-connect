@@ -138,7 +138,7 @@ namespace MobaQuickConnect {
      if(title.ToString().StartsWith("GDI+ Window",StringComparison.OrdinalIgnoreCase)) {
       ShowWindowAsync(window,0); return true;
      }
-     if(!title.ToString().StartsWith("MobaXterm",StringComparison.OrdinalIgnoreCase)) return true;
+     // The real terminal title can be the current connection name.
      Rect bounds;
      if(GetWindowRect(window,out bounds)) {
       if(bounds.right-bounds.left<320 || bounds.bottom-bounds.top<160) return true;
