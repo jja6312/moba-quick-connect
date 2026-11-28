@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QComboBox, QCompleter, QDialog, QFileDialog,
     QHBoxLayout, QInputDialog, QMessageBox, QPushButton, QStyle, QTableWidget,
     QTableWidgetItem, QAbstractItemView, QHeaderView, QVBoxLayout, QWidget)
@@ -33,6 +34,16 @@ class KeyLibrary(QObject):
         return added
 
 
+class SearchCombo(QComboBox):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor('#bca4e8'), 1.5))
+        x, y = self.width() - 15, self.height() // 2
+        painter.drawLine(x - 4, y - 2, x, y + 2)
+        painter.drawLine(x, y + 2, x + 4, y - 2)
+
+
 class KeyPicker(QWidget):
     advance = Signal()
     finished = Signal()
@@ -46,7 +57,7 @@ class KeyPicker(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
-        self.combo = QComboBox(self)
+        self.combo = SearchCombo(self)
         self.combo.setEditable(True)
         self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.combo.setMinimumWidth(0)

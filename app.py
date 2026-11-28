@@ -194,7 +194,8 @@ class ConnectionForm(QWidget):
         jump_header = QHBoxLayout()
         jump_header.addWidget(self.jump)
         jump_header.addStretch(1)
-        self.jump_expand = button("▸ Bastion 펼치기", name="quiet")
+        self.jump_expand = button("Bastion 펼치기", name="quiet")
+        self.jump_expand.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
         self.jump_expand.setCheckable(True)
         jump_header.addWidget(self.jump_expand)
         outer.addLayout(jump_header)
@@ -219,7 +220,8 @@ class ConnectionForm(QWidget):
         outer.addWidget(self.jump_panel)
         self.fields["bastion_host"].editingFinished.connect(lambda: self.fields["bastion_host"].setText(self.fields["bastion_host"].text().strip()))
         self.jump_expand.toggled.connect(self.jump_panel.setVisible)
-        self.jump_expand.toggled.connect(lambda expanded: self.jump_expand.setText("▾ Bastion 접기" if expanded else "▸ Bastion 펼치기"))
+        self.jump_expand.toggled.connect(lambda expanded: self.jump_expand.setText("Bastion 접기" if expanded else "Bastion 펼치기"))
+        self.jump_expand.toggled.connect(lambda expanded: self.jump_expand.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown if expanded else QStyle.StandardPixmap.SP_ArrowRight)))
         self.jump.toggled.connect(self.jump_expand.setChecked)
         self.jump_panel.hide()
 
@@ -290,8 +292,11 @@ class ProtocolDelegate(QStyledItemDelegate):
             painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              option.fontMetrics.elidedText(index.data() or "", Qt.TextElideMode.ElideRight, max(0, rect.width())))
             expanded = index.row() // 2 in self.parent().expanded_rows
-            painter.setPen(QColor("#b68aff"))
-            painter.drawText(option.rect.adjusted(option.rect.width() - 24, 0, 0, 0), Qt.AlignmentFlag.AlignCenter, "▾" if expanded else "▸")
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#b68aff"))
+            x, y = option.rect.right() - 12, option.rect.center().y()
+            points = [(x - 4, y - 2), (x + 4, y - 2), (x, y + 3)] if expanded else [(x - 2, y - 4), (x - 2, y + 4), (x + 3, y)]
+            painter.drawPolygon(QPolygon([QPoint(*point) for point in points]))
             painter.restore()
             return
         if index.column() == 5:
