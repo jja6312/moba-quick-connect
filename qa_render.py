@@ -1,76 +1,79 @@
-"""Render the actual Qt widgets using only synthetic data; no desktop input."""
+"""Render actual Qt widgets with synthetic connections and no desktop input."""
 import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import argparse
-import tempfile
 from pathlib import Path
+import tempfile
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 import app as ui
 import core
+from key_picker import FavoriteKeysDialog, KeyPicker
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("output", type=Path)
+    parser.add_argument('output', type=Path)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     app = QApplication([])
     ui.configure_application(app)
     with tempfile.TemporaryDirectory() as temporary:
         store = core.Store(temporary)
-        store.state["moba_exe"] = r"C:\Programs\MobaXterm.exe"
-        store.state["favorite_keys"] = [
-            {"name": "운영 서버", "path": r"C:\Keys\production-key"},
-            {"name": "Bastion", "path": r"C:\Keys\bastion.ppk"}]
+        store.state['moba_exe'] = r'C:\Programs\MobaXterm.exe'
+        store.state['favorite_keys'] = [
+            {'name': '운영 서버', 'path': r'C:\Keys\production-key'},
+            {'name': '운영 예비', 'path': r'C:\Keys\production-backup'},
+            {'name': 'Bastion', 'path': r'C:\Keys\bastion.ppk'}]
         window = ui.MainWindow(store, dry_run=True, no_tray=True)
-        window.show()
-        app.processEvents()
-        window.grab().save(str(args.output / "01-single-ssh.png"))
-        window.single_protocol.setCurrentText("RDP")
-        window.single_form.jump.setChecked(True)
-        window.single_form.fields["bastion_host"].setText("198.51.100.10")
-        app.processEvents()
-        window.grab().save(str(args.output / "02-rdp-bastion.png"))
-        window.select_page(1)
-        window.grid.setCurrentCell(0, 0)
-        window.grid.paste_text("192.0.2.11\n192.0.2.12\n192.0.2.13\n192.0.2.14")
         rows = window.grid.rows()
         for index, row in enumerate(rows[:4]):
-            row.update(name=f"server-{index + 1:02}", bastion_host="198.51.100.10")
+            row.update(name=f'server-{index + 1:02}', host=f'192.0.2.{index + 11}',
+                       bastion_host='198.51.100.10', key_path=r'C:\Keys\production-key',
+                       bastion_key_path=r'C:\Keys\bastion.ppk')
+        rows[3]['key_path'] = r'C:\Keys\unregistered-key.pem'
         window.grid.set_rows(rows)
         window.grid.setCurrentCell(0, 0)
+        window.show()
         app.processEvents()
-        window.grab().save(str(args.output / "03-bulk.png"))
+        window.grab().save(str(args.output / '01-bulk-purple.png'))
+        window.grid.toggle_current_bastion()
+        app.processEvents()
+        window.grab().save(str(args.output / '02-bastion.png'))
         window.bastion_rows.click()
         app.processEvents()
-        window.grab().save(str(args.output / "07-bulk-expanded.png"))
+        window.grab().save(str(args.output / '03-all-bastion.png'))
         window.bastion_rows.click()
-        window.details.setChecked(False)
+        window.grid.select_connection_rows(0, 2)
         app.processEvents()
-        window.grab().save(str(args.output / "04-bulk-basic.png"))
-        window.select_page(2)
+        window.grab().save(str(args.output / '04-row-selection.png'))
+        window.grid.leave_row_mode()
+        for theme in ('blue', 'teal', 'amber', 'rose', 'slate', 'light'):
+            window.theme_picker.setCurrentIndex(window.theme_picker.findData(theme))
+            app.processEvents()
+            window.grab().save(str(args.output / ('theme-' + theme + '.png')))
+        window.theme_picker.setCurrentIndex(window.theme_picker.findData('purple'))
+        window.grid.setCurrentCell(0, 5)
+        window.grid.editItem(window.grid.item(0, 5))
         app.processEvents()
-        window.grab().save(str(args.output / "05-defaults.png"))
-        window.select_page(0)
-        window.single_protocol.setCurrentText("SSH")
-        window.resize(760, 420)
+        picker = next(p for p in window.grid.viewport().findChildren(KeyPicker) if p.isVisible() and not p.closed)
+        QTest.keyClicks(picker.combo, 'prod')
         app.processEvents()
-        window.grab().save(str(args.output / "06-compact.png"))
-        window.resize(860, 440)
-        window.single_form.fields["key_path"].combo.showPopup()
+        window.grab().save(str(args.output / '05-key-search.png'))
+        picker.combo.completer().popup().grab().save(str(args.output / '06-ranked-keys.png'))
+        picker.combo.completer().popup().hide()
+        window.grid.commit_editor()
+        window.select_page(1)
         app.processEvents()
-        window.grab().save(str(args.output / "08-key-selector.png"))
-        window.single_form.fields["key_path"].combo.view().window().grab().save(str(args.output / "09-key-dropdown.png"))
-        window.single_form.fields["key_path"].combo.hidePopup()
-        from key_picker import FavoriteKeysDialog
+        window.grab().save(str(args.output / '07-defaults.png'))
         manager = FavoriteKeysDialog(window.key_library, window)
         manager.show()
         app.processEvents()
-        manager.grab().save(str(args.output / "10-favorite-manager.png"))
+        manager.grab().save(str(args.output / '08-favorite-manager.png'))
         manager.close()
         window.quitting = True
         window.close()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

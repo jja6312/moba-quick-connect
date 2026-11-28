@@ -1,4 +1,4 @@
-"""Moba Quick Connect: keyboard-first single and spreadsheet connection entry."""
+"""Moba Quick Connect: keyboard-first connection table and reusable defaults."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QTimer, QSize, QRect, QPoint, QEvent, QObject, QT
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
+    QColorDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyledItemDelegate,
     QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QVBoxLayout, QWidget)
@@ -22,6 +22,7 @@ import core
 import fill as spreadsheet_fill
 import integration
 import portable
+import themes
 from windows import ScopedHotkey, discover_moba, reveal_window
 from key_picker import KeyLibrary, KeyPicker, FavoriteKeysDialog
 
@@ -99,6 +100,7 @@ def configure_application(app):
     app.setPalette(palette)
     app.setFont(QFont("Malgun Gothic", 10))
     app.setStyleSheet(STYLE)
+    themes.apply(app, STYLE)
 
 
 def icon():
@@ -286,26 +288,26 @@ class ProtocolDelegate(QStyledItemDelegate):
         if not index.row() % 2 and index.column() == 0:
             painter.save()
             selected = bool(option.state & QApplication.style().StateFlag.State_Selected)
-            painter.fillRect(option.rect, QColor("#493367" if selected else "#1d1b29"))
-            painter.setPen(QColor("#eeecf7"))
+            painter.fillRect(option.rect, themes.color(self, "#493367" if selected else "#1d1b29"))
+            painter.setPen(themes.color(self, "#eeecf7"))
             rect = option.rect.adjusted(5, 0, -25, 0)
             painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              option.fontMetrics.elidedText(index.data() or "", Qt.TextElideMode.ElideRight, max(0, rect.width())))
             expanded = index.row() // 2 in self.parent().expanded_rows
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#b68aff"))
+            painter.setBrush(themes.color(self, "#b68aff"))
             x, y = option.rect.right() - 12, option.rect.center().y()
             points = [(x - 4, y - 2), (x + 4, y - 2), (x, y + 3)] if expanded else [(x - 2, y - 4), (x - 2, y + 4), (x + 3, y)]
             painter.drawPolygon(QPolygon([QPoint(*point) for point in points]))
             painter.restore()
             return
         if index.column() == 5:
-            selected = bool(option.state & QApplication.style().StateFlag.State_Selected) and index.row() % 2 == self.parent().currentRow() % 2
+            selected = bool(option.state & QApplication.style().StateFlag.State_Selected) and (index.row() % 2 == self.parent().currentRow() % 2 or index.row() // 2 in self.parent().whole_rows)
             painter.save()
-            painter.fillRect(option.rect, QColor("#493367" if selected else "#2b233a" if index.row() % 2 else "#1d1b29"))
+            painter.fillRect(option.rect, themes.color(self, "#493367" if selected else "#2b233a" if index.row() % 2 else "#1d1b29"))
             painter.setFont(option.font)
-            painter.setPen(QColor("#cfb9ec" if index.data() else "#8f7da9"))
-            text = index.data() or ("Bastion 키" if index.row() % 2 else "키 선택")
+            painter.setPen(themes.color(self, "#cfb9ec" if index.data() else "#8f7da9"))
+            text = self.key_label(index.data()) or ("Bastion 키" if index.row() % 2 else "키 선택")
             rect = option.rect.adjusted(5, 0, -26, 0)
             painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideMiddle, max(0, rect.width())))
@@ -315,11 +317,11 @@ class ProtocolDelegate(QStyledItemDelegate):
             return
         if index.row() % 2:
             text = index.data() or {1: "Bastion IP", 3: "사용자", 4: "22", 5: "Bastion 키"}.get(index.column(), "")
-            selected = bool(option.state & QApplication.style().StateFlag.State_Selected) and self.parent().currentRow() % 2 == 1
+            selected = bool(option.state & QApplication.style().StateFlag.State_Selected) and (self.parent().currentRow() % 2 == 1 or index.row() // 2 in self.parent().whole_rows)
             painter.save()
-            painter.fillRect(option.rect, QColor("#493367" if selected else "#2b233a"))
+            painter.fillRect(option.rect, themes.color(self, "#493367" if selected else "#2b233a"))
             painter.setFont(option.font)
-            painter.setPen(QColor("#cfb9ec" if index.data() else "#8f7da9"))
+            painter.setPen(themes.color(self, "#cfb9ec" if index.data() else "#8f7da9"))
             rect = option.rect.adjusted(5, 0, -5, 0)
             painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideRight, max(0, rect.width())))
@@ -328,6 +330,10 @@ class ProtocolDelegate(QStyledItemDelegate):
         if self.parent().currentRow() % 2 == 1:
             option.state &= ~QApplication.style().StateFlag.State_Selected
         super().paint(painter, option, index)
+
+    def key_label(self, path):
+        library = self.parent().key_library
+        return library.store.key_label(path) if library else str(path or '')
 
     def editorEvent(self, event, model, option, index):
         if not index.row() % 2 and index.column() == 0 and event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton and event.position().x() >= option.rect.right() - 25:
@@ -377,8 +383,8 @@ class ConnectionRowHeader(QHeaderView):
         image = QPixmap(24, 24)
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
-        painter.setPen(QPen(QColor("#eee7ff"), 1))
-        painter.setBrush(QColor("#282033"))
+        painter.setPen(QPen(themes.color(self, "#eee7ff"), 1))
+        painter.setBrush(themes.color(self, "#282033"))
         painter.drawPolygon(QPolygon([QPoint(3, 8), QPoint(13, 8), QPoint(13, 3), QPoint(22, 12), QPoint(13, 21), QPoint(13, 16), QPoint(3, 16)]))
         painter.end()
         self.viewport().setCursor(QCursor(image, 21, 12))
@@ -427,6 +433,9 @@ class ConnectionGrid(QTableWidget):
         self.bastion_visible = False
         self.expanded_rows = set()
         self.whole_rows = set()
+        self.row_mode = False
+        self.row_anchor = None
+        self.row_cursor = None
         self.drag_layer = 0
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -449,7 +458,9 @@ class ConnectionGrid(QTableWidget):
         self.horizontalHeader().setStretchLastSection(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.itemChanged.connect(self.on_item_changed)
-        self.cellPressed.connect(lambda *_: self.whole_rows.clear())
+        self.cellPressed.connect(self.leave_row_mode)
+        if self.key_library:
+            self.key_library.changed.connect(self.refresh_key_labels)
         self.append_rows(8, record=False)
         self.previous = self.rows()
         for keys, handler in (("Ctrl+V", self.paste), ("Ctrl+C", self.copy), ("Ctrl+D", self.fill_down),
@@ -460,6 +471,33 @@ class ConnectionGrid(QTableWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.context_menu)
         self.set_details(False)
+        toggle = QShortcut(QKeySequence('Alt+Return'), self)
+        toggle.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        toggle.activated.connect(self.toggle_current_bastion)
+
+    def leave_row_mode(self, *_):
+        self.whole_rows.clear()
+        self.row_mode = False
+        self.row_anchor = self.row_cursor = None
+
+    def refresh_key_labels(self):
+        previous = self.mutating
+        self.mutating = True
+        try:
+            for row in range(self.rowCount()):
+                item = self.item(row, 5)
+                if item:
+                    item.setData(Qt.ItemDataRole.AccessibleTextRole, self.key_library.store.key_label(item.text()))
+            self.viewport().update()
+        finally:
+            self.mutating = previous
+
+    def toggle_current_bastion(self):
+        row = max(0, self.currentRow()) // 2
+        self.toggle_bastion(row)
+        self.leave_row_mode()
+        self.setCurrentCell(row * 2 + (1 if row in self.expanded_rows else 0), 1)
+        self.setFocus()
 
     def set_details(self, enabled):
         for col in (5, 6):
@@ -489,6 +527,8 @@ class ConnectionGrid(QTableWidget):
 
     def select_connection_rows(self, first, last, modifiers=Qt.KeyboardModifier.NoModifier):
         self.commit_editor()
+        if modifiers & Qt.KeyboardModifier.ShiftModifier and self.row_anchor is not None:
+            first = self.row_anchor
         picked = set(range(min(first, last), max(first, last) + 1))
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             picked ^= self.whole_rows
@@ -497,6 +537,8 @@ class ConnectionGrid(QTableWidget):
         for row in sorted(picked):
             self.setRangeSelected(QTableWidgetSelectionRange(row * 2, 0, row * 2 + 1, self.columnCount() - 1), True)
         self.whole_rows = picked
+        self.row_mode = True
+        self.row_anchor, self.row_cursor = first, last
         self.setFocus()
 
     def field_at(self, row, column):
@@ -525,7 +567,7 @@ class ConnectionGrid(QTableWidget):
         if self.bastion_visible:
             self.expanded_rows = set(range(len(rows)))
         self.expanded_rows.intersection_update(range(len(rows)))
-        self.whole_rows.clear()
+        self.leave_row_mode()
         self.mutating = True
         self.setRowCount(len(rows) * 2)
         for r, row in enumerate(rows):
@@ -538,9 +580,12 @@ class ConnectionGrid(QTableWidget):
                     if field in ("name", "host", "bastion_host"):
                         value = value.strip()
                     item = QTableWidgetItem(value if field else ("Bastion" if c == 0 else ""))
+                    if field in ('key_path', 'bastion_key_path'):
+                        item.setToolTip(value)
+                        item.setData(Qt.ItemDataRole.AccessibleTextRole, self.key_library.store.key_label(value) if self.key_library else value)
                     if layer:
-                        item.setBackground(QColor("#2b233a"))
-                        item.setForeground(QColor("#cfb9ec") if field else QColor("#9780b6"))
+                        item.setBackground(themes.color(self, "#2b233a"))
+                        item.setForeground(themes.color(self, "#cfb9ec") if field else themes.color(self, "#9780b6"))
                     if not field:
                         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                     self.setItem(physical, c, item)
@@ -561,6 +606,11 @@ class ConnectionGrid(QTableWidget):
         if self.mutating:
             return
         self.remember()
+        if self.field_at(item.row(), item.column()) in ('key_path', 'bastion_key_path'):
+            self.mutating = True
+            item.setToolTip(item.text())
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, self.key_library.store.key_label(item.text()) if self.key_library else item.text())
+            self.mutating = False
         if self.field_at(item.row(), item.column()) in ("name", "host", "bastion_host"):
             self.mutating = True
             item.setText(item.text().strip())
@@ -694,7 +744,7 @@ class ConnectionGrid(QTableWidget):
             delegate.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.NoHint)
 
     def move_down(self, row=None, column=None):
-        self.whole_rows.clear()
+        self.leave_row_mode()
         row = self.currentRow() if row is None else row
         column = self.currentColumn() if column is None else column
         if row < 0:
@@ -709,6 +759,33 @@ class ConnectionGrid(QTableWidget):
         self.setFocus()
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and event.modifiers() == Qt.KeyboardModifier.AltModifier:
+            self.toggle_current_bastion()
+            event.accept()
+            return
+        if self.row_mode:
+            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+                row = min(self.logical_count() - 1, max(0, self.row_cursor + (-1 if event.key() == Qt.Key.Key_Up else 1)))
+                first = self.row_anchor if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else row
+                self.select_connection_rows(first, row)
+                self.scrollToItem(self.item(row * 2, 0))
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Right:
+                row = self.row_cursor
+                self.leave_row_mode()
+                self.clearSelection()
+                self.setCurrentCell(row * 2, 0)
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Left:
+                event.accept()
+                return
+        elif event.key() == Qt.Key.Key_Left and self.currentColumn() == 0:
+            row = max(0, self.currentRow()) // 2
+            self.select_connection_rows(row, row)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and self.drag_seed:
             self.cancel_fill()
             event.accept()
@@ -751,13 +828,15 @@ class ConnectionGrid(QTableWidget):
         painter = QPainter(self.viewport())
         if self.drag_target:
             area = self.rectangle_pixels(self.drag_target)
-            painter.setPen(QPen(QColor("#ba91ff"), 2))
-            painter.setBrush(QColor(164, 117, 251, 24))
+            painter.setPen(QPen(themes.color(self, "#ba91ff"), 2))
+            fill_color = themes.color(self, '#a475fb')
+            fill_color.setAlpha(24)
+            painter.setBrush(fill_color)
             painter.drawRect(area.adjusted(0, 0, -1, -1))
         handle = self.fill_handle()
         if not handle.isEmpty():
-            painter.setBrush(QColor("#b68aff"))
-            painter.setPen(QPen(QColor("#171220"), 1))
+            painter.setBrush(themes.color(self, "#b68aff"))
+            painter.setPen(QPen(themes.color(self, "#171220"), 1))
             painter.drawRect(handle)
         painter.end()
 
@@ -938,7 +1017,7 @@ class MainWindow(QMainWindow):
         self.registration_thread = None
         self.setWindowTitle("Moba Quick Connect " + core.VERSION)
         self.setWindowIcon(icon())
-        self.resize(860, 440)
+        self.resize(860, 520)
         self.setMinimumSize(760, 420)
         central = QWidget()
         self.setCentralWidget(central)
@@ -951,17 +1030,7 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(12, 10, 12, 8)
         body.setSpacing(8)
         header = QHBoxLayout()
-        tabs = QFrame()
-        tabs.setStyleSheet("QFrame {background:#16151f;border:1px solid #312a40;border-radius:11px;}")
-        tab_layout = QHBoxLayout(tabs)
-        tab_layout.setContentsMargins(3, 3, 3, 3)
-        self.tabs = []
-        for i, text in enumerate(("단건 입력", "일괄 입력")):
-            item = button(text, lambda _=False, index=i: self.select_page(index), "tab")
-            item.setCheckable(True)
-            self.tabs.append(item)
-            tab_layout.addWidget(item)
-        header.addWidget(tabs)
+        header.addWidget(button("연결 입력", lambda: self.select_page(0), "quiet"))
         header.addStretch(1)
         self.profiles = QComboBox()
         self.profiles.setAccessibleName("기본값 프로필")
@@ -969,6 +1038,16 @@ class MainWindow(QMainWindow):
         self.profiles.setMaximumWidth(180)
         header.addWidget(self.profiles)
         header.addWidget(button("+", self.new_profile, "quiet"))
+        self.theme_picker = QComboBox()
+        self.theme_picker.setAccessibleName("테마 색상")
+        self.theme_picker.setMaximumWidth(100)
+        for identity, title, _ in themes.PRESETS:
+            self.theme_picker.addItem(title, identity)
+        current_theme = self.theme_picker.findData(self.store.state['theme'])
+        self.theme_picker.setCurrentIndex(max(0, current_theme))
+        self.theme_picker.currentIndexChanged.connect(self.change_theme)
+        header.addWidget(self.theme_picker)
+        header.addWidget(button("색상", self.pick_theme_color, "quiet"))
         files = button("파일", name="quiet")
         menu = QMenu(files)
         menu.addAction("연결 가져오기", self.import_package)
@@ -978,12 +1057,11 @@ class MainWindow(QMainWindow):
         files.setMenu(menu)
         header.addWidget(files)
         header.addWidget(button("즐겨찾는 키", self.manage_keys, "quiet"))
-        header.addWidget(button("기본값 설정", lambda: self.select_page(2), "quiet"))
+        header.addWidget(button("기본값 설정", lambda: self.select_page(1), "quiet"))
         header.addWidget(button("숨기기", self.hide, "quiet"))
         body.addLayout(header)
         self.pages = QStackedWidget()
         body.addWidget(self.pages, 1)
-        self.make_single()
         self.make_bulk()
         self.make_settings()
         self.status = label("", "status")
@@ -995,6 +1073,7 @@ class MainWindow(QMainWindow):
         self.profiles.currentTextChanged.connect(self.change_profile)
         self.refresh_profiles()
         self.select_page(0)
+        self.apply_theme()
         if not self.store.state["moba_exe"]:
             self.store.state["moba_exe"] = discover_moba()
         self.exe_field.setText(self.store.state["moba_exe"])
@@ -1004,7 +1083,7 @@ class MainWindow(QMainWindow):
             self.tray.setToolTip("Moba Quick Connect · Ctrl+Shift+Space")
             menu = QMenu()
             menu.addAction("빠른 연결", self.show_popup)
-            menu.addAction("기본값 설정", lambda: (self.show_popup(), self.select_page(2)))
+            menu.addAction("기본값 설정", lambda: (self.show_popup(), self.select_page(1)))
             menu.addSeparator()
             menu.addAction("종료", self.quit_app)
             self.tray.setContextMenu(menu)
@@ -1014,35 +1093,6 @@ class MainWindow(QMainWindow):
                                     ("Ctrl+1", lambda: self.select_page(0)), ("Ctrl+2", lambda: self.select_page(1))):
             QShortcut(QKeySequence(sequence), self).activated.connect(callback)
 
-    def make_single(self):
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(8)
-        self.single_protocol = QComboBox()
-        self.single_protocol.addItems(["SSH", "RDP"])
-        self.single_protocol.setAccessibleName("단건 연결 방식")
-        self.single_protocol.currentTextChanged.connect(lambda _: self.apply_single_defaults())
-        self.host = line("")
-        self.host.setObjectName("host")
-        self.host.setAccessibleName("접속 IP")
-        self.host.returnPressed.connect(self.connect_single)
-        self.single_card, card_layout = card()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.single_form = ConnectionForm(address_widgets=(self.host, self.single_protocol), key_library=self.key_library)
-        scroll.setWidget(self.single_form)
-        card_layout.addWidget(scroll)
-        outer.addWidget(self.single_card, 1)
-        actions = QHBoxLayout()
-        actions.addWidget(button("기본값으로 저장", self.save_single_defaults, "quiet"))
-        actions.addStretch(1)
-        self.single_action = button("세션 추가", self.connect_single, "primary")
-        self.single_action.setToolTip("Enter 또는 Ctrl+Enter · 기존 MobaXterm에 추가 후 재시작")
-        self.single_action.setMinimumWidth(180)
-        actions.addWidget(self.single_action)
-        outer.addLayout(actions)
-        self.pages.addWidget(page)
 
     def make_bulk(self):
         page = QWidget()
@@ -1066,7 +1116,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.details)
         self.bastion_rows = button("Bastion 모두 펼치기")
         self.bastion_rows.setCheckable(True)
-        self.bastion_rows.setToolTip("연결 이름 오른쪽 화살표로 개별 펼치기")
+        self.bastion_rows.setToolTip("Alt+Enter: 현재 연결의 Bastion 펼치기/접기")
         self.bastion_rows.toggled.connect(lambda checked: self.grid.set_bastion(checked))
         controls.addWidget(self.bastion_rows)
         outer.addLayout(controls)
@@ -1076,7 +1126,7 @@ class MainWindow(QMainWindow):
         self.grid.setAccessibleName("일괄 연결 입력 표")
         outer.addWidget(self.grid, 1)
         hints = QHBoxLayout()
-        hints.addWidget(label("Enter 다음 행   드래그 복사   Ctrl+드래그 +1   행 번호: 연결 전체 선택", "muted"), 1)
+        hints.addWidget(label("Enter 다음 행   Alt+Enter Bastion   ← 행 선택   Shift+↑↓ 여러 행 선택", "muted"), 1)
         outer.addLayout(hints)
         actions = QHBoxLayout()
         actions.addWidget(button("CSV 불러오기", self.import_csv))
@@ -1099,7 +1149,7 @@ class MainWindow(QMainWindow):
     def export_current_package(self):
         def action():
             self.grid.commit_editor()
-            rows = self.grid.rows() if self.pages.currentIndex() == 1 else [{**self.single_form.get_row(), "host": self.host.text()}]
+            rows = self.grid.rows()
             self.export_package_rows(rows)
         self.perform(action)
 
@@ -1129,7 +1179,7 @@ class MainWindow(QMainWindow):
             self.grid.expanded_rows.clear()
             self.grid.set_rows(rows)
             self.key_library.changed.emit()
-            self.select_page(1)
+            self.select_page(0)
             self.set_status(f"연결 {len(rows)}개를 가져왔습니다. 확인 후 일괄 추가하세요.")
         self.perform(action)
 
@@ -1176,19 +1226,47 @@ class MainWindow(QMainWindow):
             self.profiles.addItem(name)
         self.profiles.setCurrentText(self.store.state["active_profile"])
         self.profiles.blockSignals(False)
-        self.apply_single_defaults()
 
     def manage_keys(self):
         dialog = FavoriteKeysDialog(self.key_library, self)
         dialog.exec()
         dialog.deleteLater()
 
+    def apply_theme(self):
+        tokens = themes.apply(QApplication.instance(), STYLE, self.store.state['theme'], self.store.state['custom_accent'])
+        self.setProperty('mobaTheme', tokens)
+        self.grid.viewport().update()
+        if self.status.text():
+            self.set_status(self.status.text(), getattr(self, 'status_error', False))
+
+    def change_theme(self):
+        try:
+            self.store.set_theme(self.theme_picker.currentData())
+        except (ValueError, OSError) as exc:
+            self.theme_picker.blockSignals(True)
+            self.theme_picker.setCurrentIndex(self.theme_picker.findData(self.store.state['theme']))
+            self.theme_picker.blockSignals(False)
+            self.set_status(str(exc), True)
+            return
+        self.apply_theme()
+
+    def pick_theme_color(self):
+        chosen = QColorDialog.getColor(QColor(self.store.state['custom_accent']), self, '테마 색상 선택')
+        if not chosen.isValid():
+            return
+        def action():
+            self.store.set_theme('custom', chosen.name())
+            self.theme_picker.blockSignals(True)
+            self.theme_picker.setCurrentIndex(self.theme_picker.findData('custom'))
+            self.theme_picker.blockSignals(False)
+            self.apply_theme()
+        self.perform(action)
+
     def change_profile(self, name):
         if not name:
             return
         self.store.state["active_profile"] = name
         self.store.save()
-        self.apply_single_defaults()
         rows = self.grid.rows()
         self.grid.set_rows([r if r["host"] else core.new_row(self.store.profile, r["protocol"] if r["protocol"] in core.DEFAULTS else "SSH") for r in rows])
         self.settings_draft = copy.deepcopy(self.store.profile)
@@ -1207,23 +1285,12 @@ class MainWindow(QMainWindow):
             self.store.state["active_profile"] = name
             self.store.save()
             self.refresh_profiles()
-            self.select_page(2)
+            self.select_page(1)
 
-    def apply_single_defaults(self):
-        if hasattr(self, "single_form"):
-            self.single_form.set_row(core.new_row(self.store.profile, self.single_protocol.currentText()))
 
     def select_page(self, index):
-        if index and self.height() < 520:
-            self.resize(self.width(), 520)
-        elif index == 0 and self.height() == 520:
-            self.resize(self.width(), 440)
         self.pages.setCurrentIndex(index)
-        for i, tab in enumerate(self.tabs):
-            tab.setChecked(index == i)
         if index == 0:
-            QTimer.singleShot(0, self.host.setFocus)
-        elif index == 1:
             QTimer.singleShot(0, self.grid.setFocus)
         else:
             self.settings_draft = copy.deepcopy(self.store.profile)
@@ -1255,15 +1322,6 @@ class MainWindow(QMainWindow):
             self.select_page(0)
         self.perform(action)
 
-    def save_single_defaults(self):
-        def action():
-            row = self.single_form.get_row()
-            core.normalize({**row, "host": "192.0.2.1"}, check_keys=True)
-            kind = row["protocol"]
-            self.store.profile[kind] = {f: row.get(f, "") for f in core.DEFAULTS[kind]}
-            self.store.save()
-            self.set_status(f"{self.store.state['active_profile']}의 {kind} 기본값을 저장했습니다.")
-        self.perform(action)
 
     def pick_exe(self):
         path, _ = QFileDialog.getOpenFileName(self, "MobaXterm 실행 파일 선택", "", "MobaXterm (*.exe)")
@@ -1280,9 +1338,10 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def set_status(self, text, error=False):
+        self.status_error = error
         self.status.setText(text)
         self.status.setVisible(bool(text))
-        self.status.setStyleSheet("color:#ffb1c8;" if error else "color:#b9afd0;")
+        self.status.setStyleSheet('color:' + themes.color(self, '#ffb1c8' if error else '#b9afd0').name() + ';')
 
     def start_registration(self, rows):
         if self.registration_thread is not None:
@@ -1300,7 +1359,6 @@ class MainWindow(QMainWindow):
             old = existing.get((row["folder"].casefold(), row["name"].casefold()))
             if old and old != row:
                 raise ValueError(f"{row['name']}: 같은 이름의 등록 기록이 있습니다.")
-        self.single_action.setEnabled(False)
         self.bulk_action.setEnabled(False)
         self.set_status("기존 MobaXterm에 추가합니다.")
         thread = QThread(self)
@@ -1335,15 +1393,9 @@ class MainWindow(QMainWindow):
     def registration_cleaned(self):
         thread = self.registration_thread
         self.registration_thread = self.registration_worker = None
-        self.single_action.setEnabled(True)
         self.bulk_action.setEnabled(True)
         thread.deleteLater()
 
-    def connect_single(self):
-        def action():
-            row = core.normalize({**self.single_form.get_row(), "host": self.host.text()}, check_keys=True)
-            self.start_registration([row])
-        self.perform(action)
 
     def register_bulk(self):
         def action():
@@ -1358,7 +1410,7 @@ class MainWindow(QMainWindow):
             self.grid.set_rows([r if r["host"] else core.new_row(self.store.profile, kind) for r in self.grid.rows()])
 
     def primary_action(self):
-        {0: self.connect_single, 1: self.register_bulk, 2: self.save_settings}[self.pages.currentIndex()]()
+        {0: self.register_bulk, 1: self.save_settings}[self.pages.currentIndex()]()
 
     def import_csv(self):
         path, _ = QFileDialog.getOpenFileName(self, "CSV 불러오기", "", "CSV (*.csv)")
@@ -1417,8 +1469,7 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         if self.pages.currentIndex() == 0:
-            self.host.setFocus()
-            self.host.selectAll()
+            self.grid.setFocus()
 
     def escape(self):
         for picker in self.findChildren(KeyPicker):

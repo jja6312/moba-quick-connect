@@ -44,7 +44,7 @@ class CompactRowsTests(unittest.TestCase):
             core.normalize({**row,'host':'192.0.2. 1'})
 
     def test_individual_collapse_and_expand_all_keep_bastion_values(self):
-        self.window.select_page(1);self.app.processEvents()
+        self.window.select_page(0);self.app.processEvents()
         grid=self.window.grid
         grid.item(1,1).setText('198.51.100.1')
         self.assertTrue(all(grid.isRowHidden(r) for r in range(1,grid.rowCount(),2)))
@@ -58,8 +58,9 @@ class CompactRowsTests(unittest.TestCase):
         self.assertTrue(all(grid.isRowHidden(r) for r in range(1,grid.rowCount(),2)))
         self.assertEqual(grid.rows()[0]['bastion_host'],'198.51.100.1')
 
-    def test_single_defaults_bastion_is_collapsed_but_still_enabled(self):
-        form=self.window.single_form
+    def test_profile_bastion_is_collapsed_but_still_enabled(self):
+        self.window.select_page(1)
+        form=self.window.settings_form
         form.set_row({**core.new_row(self.store.profile),'bastion_host':'198.51.100.1'})
         self.assertTrue(form.jump.isChecked())
         self.assertFalse(form.jump_panel.isVisible())
@@ -68,7 +69,7 @@ class CompactRowsTests(unittest.TestCase):
         self.assertTrue(form.jump_panel.isVisible())
 
     def test_row_header_selection_copy_and_paste_include_hidden_bastion(self):
-        self.window.select_page(1);self.app.processEvents()
+        self.window.select_page(0);self.app.processEvents()
         grid=self.window.grid
         rows=grid.rows();rows[0].update(name='node 01',host='192.0.2.1',bastion_host='198.51.100.1',bastion_user='jump')
         grid.set_rows(rows)
@@ -98,7 +99,7 @@ class CompactRowsTests(unittest.TestCase):
         with patch.object(ui.QFileDialog,'getOpenFileName',return_value=(str(archive),'')), \
              patch.object(QMessageBox,'question',return_value=QMessageBox.StandardButton.Yes):
             self.window.import_package()
-        self.assertEqual(self.window.pages.currentIndex(),1)
+        self.assertEqual(self.window.pages.currentIndex(),0)
         imported=self.window.grid.rows()[0]
         self.assertNotEqual(imported['key_path'],str(key))
         self.assertEqual(Path(imported['key_path']).read_bytes(),b'SYNTHETIC UI KEY')

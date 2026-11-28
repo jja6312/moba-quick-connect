@@ -37,17 +37,18 @@ class InterfaceTests(unittest.TestCase):
         self.app.processEvents()
         self.tmp.cleanup()
 
-    def test_ip_only_enter_registers_single_and_restores_defaults(self):
-        self.window.host.setFocus()
-        QTest.keyClicks(self.window.host, "192.0.2.8")
-        QTest.keyClick(self.window.host, Qt.Key.Key_Return)
+    def test_ip_only_bulk_registers_with_profile_defaults(self):
+        self.window.grid.setCurrentCell(0, 1)
+        self.window.grid.paste_text("192.0.2.8")
+        self.window.register_bulk()
         self.assertEqual(len(self.store.state["connections"]), 1)
         self.assertEqual(self.store.state["connections"][0]["user"], "opc")
         self.assertFalse((Path(self.tmp.name) / "launches").exists())
 
     def test_protocol_defaults_and_bastion_fields(self):
-        self.window.single_protocol.setCurrentText("RDP")
-        form = self.window.single_form
+        self.window.select_page(1)
+        self.window.settings_protocol.setCurrentText("RDP")
+        form = self.window.settings_form
         self.assertEqual(form.fields["port"].text(), "3389")
         self.assertEqual(form.fields["user"].text(), "Administrator")
         self.assertFalse(form.key_widget.isVisible())
@@ -55,8 +56,8 @@ class InterfaceTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(form.jump_panel.isVisible())
         form.fields["bastion_host"].setText("198.51.100.2")
-        self.window.host.setText("192.0.2.50")
-        self.window.connect_single()
+        self.window.grid.set_rows([{**form.get_row(), "host": "192.0.2.50"}])
+        self.window.register_bulk()
         self.assertEqual(self.store.state["connections"][0]["bastion_host"], "198.51.100.2")
 
     def test_multi_ip_paste_inherits_profile_and_grows_table(self):
@@ -99,7 +100,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(grid.rows()[1]["host"], "192.0.2.1")
 
     def test_default_save_switch_restart_and_bulk_draft_preservation(self):
-        self.window.select_page(2)
+        self.window.select_page(1)
         self.window.settings_form.fields["user"].setText("operator")
         self.window.settings_protocol.setCurrentText("RDP")
         self.window.settings_form.fields["port"].setText("3390")
@@ -135,7 +136,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_ctrl_enter_commits_active_cell_before_registering(self):
         grid = self.window.grid
-        self.window.select_page(1)
+        self.window.select_page(0)
         self.app.processEvents()
         grid.setCurrentCell(0, 1)
         grid.editItem(grid.item(0, 1))
@@ -146,20 +147,19 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(self.store.state["connections"], self.window.status.text())
         self.assertEqual(self.store.state["connections"][0]["host"], "192.0.2.91")
 
-    def test_compact_host_and_short_labels(self):
-        self.assertEqual(self.window.host.height(), self.window.single_form.fields["user"].height())
-        self.assertLessEqual(abs(self.window.host.width() - self.window.single_form.fields["user"].width()), 2)
-        self.assertEqual(self.window.host.placeholderText(), "")
-        self.assertEqual(self.window.host.accessibleName(), "접속 IP")
+    def test_compact_table_and_short_labels(self):
+        self.assertEqual(self.window.grid.horizontalHeaderItem(0).text(), "연결 이름")
+        self.assertEqual(self.window.grid.horizontalHeaderItem(1).text(), "접속 IP")
+        self.assertLessEqual(self.window.width(), 860)
 
     def test_key_picker_starts_with_all_files_for_target_and_bastion(self):
         for field in ("key_path", "bastion_key_path"):
             with patch.object(ui.QFileDialog, "getOpenFileName", return_value=("", "")) as dialog:
-                self.window.single_form.pick_key(field)
+                self.window.settings_form.pick_key(field)
                 self.assertEqual(dialog.call_args.args[3], "모든 파일 (*)")
 
     def test_enter_commits_cell_and_moves_down_same_column(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         self.app.processEvents()
         grid = self.window.grid
         grid.setCurrentCell(0, 1)
@@ -215,7 +215,7 @@ class InterfaceTests(unittest.TestCase):
             self.app.processEvents()
 
     def test_handle_mouse_drag_copies_multi_cell_block_then_undoes_as_one_change(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         self.app.processEvents()
         grid = self.window.grid
         rows = grid.rows()
@@ -229,7 +229,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(grid.rows(), rows)
 
     def test_handle_ctrl_mouse_drag_increments_ip_and_number(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         self.app.processEvents()
         grid = self.window.grid
         rows = grid.rows()
@@ -246,14 +246,15 @@ class InterfaceTests(unittest.TestCase):
         self.assertFalse(hasattr(self.window, "recent"))
         self.assertEqual(core.Store(self.tmp.name).state["connections"], saved)
 
-    def test_connection_name_is_above_ip_and_form_is_compact(self):
-        name = self.window.single_form.fields["name"]
-        self.assertLess(name.mapTo(self.window, name.rect().topLeft()).y(), self.window.host.mapTo(self.window, self.window.host.rect().topLeft()).y())
+    def test_single_menu_removed_and_table_is_default(self):
+        self.assertFalse(hasattr(self.window, "single_form"))
+        self.assertEqual(self.window.pages.count(), 2)
+        self.assertEqual(self.window.pages.currentIndex(), 0)
         self.assertLessEqual(self.window.width(), 860)
         self.assertLessEqual(self.window.height(), 560)
 
     def test_bastion_is_colored_lower_row_and_roundtrips_to_same_connection(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         grid = self.window.grid
         self.assertEqual(grid.columnCount(), 7)
         self.assertEqual(grid.item(1, 0).text(), "Bastion")
@@ -269,7 +270,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(records[1]["bastion_host"], "")
 
     def test_jump_paste_and_enter_stay_in_jump_rows(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         grid = self.window.grid
         grid.set_bastion(True)
         grid.setCurrentCell(1, 1)
@@ -280,7 +281,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(all(not row["host"] for row in grid.rows()))
 
     def test_ctrl_drag_bastion_increments_without_touching_target_ip(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         grid = self.window.grid
         rows = grid.rows()
         rows[0].update(host="192.0.2.1", bastion_host="198.51.100.1")
@@ -307,10 +308,10 @@ class InterfaceTests(unittest.TestCase):
 
     def test_async_registration_updates_ui_on_completion(self):
         self.window.dry_run = False
-        self.window.host.setText("192.0.2.50")
+        self.window.grid.item(0, 1).setText("192.0.2.50")
         target = ui.integration.Target("MobaXterm.exe", "profile.ini", "sessions.mxtsessions")
         with patch.object(ui.integration, "find_target", return_value=target), patch.object(ui.integration, "register", return_value={"target": target.to_dict()}):
-            self.window.connect_single()
+            self.window.register_bulk()
             for _ in range(100):
                 time.sleep(0.01)
                 self.app.processEvents()
@@ -319,14 +320,14 @@ class InterfaceTests(unittest.TestCase):
             self.assertIsNone(self.window.registration_thread)
         self.assertEqual(self.store.state["connections"][0]["host"], "192.0.2.50")
         self.assertIn("기존 MobaXterm", self.window.status.text())
-        self.assertTrue(self.window.single_action.isEnabled())
+        self.assertTrue(self.window.bulk_action.isEnabled())
 
     def test_async_registration_failure_preserves_history(self):
         self.window.dry_run = False
-        self.window.host.setText("192.0.2.51")
+        self.window.grid.item(0, 1).setText("192.0.2.51")
         target = ui.integration.Target("MobaXterm.exe", "profile.ini", "sessions.mxtsessions")
         with patch.object(ui.integration, "find_target", return_value=target), patch.object(ui.integration, "register", side_effect=ValueError("종료 취소")):
-            self.window.connect_single()
+            self.window.register_bulk()
             for _ in range(100):
                 time.sleep(0.01)
                 self.app.processEvents()

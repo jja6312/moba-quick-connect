@@ -17,7 +17,7 @@ import uuid
 
 from vendor import mobaxterm_sessions as codec
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 FIELDS = ("host", "protocol", "name", "user", "port", "key_path", "folder",
           "bastion_host", "bastion_user", "bastion_port", "bastion_key_path")
 HEADERS = ("접속 IP", "방식", "연결 이름", "사용자", "포트", "SSH 키 경로", "저장 폴더",
@@ -32,7 +32,8 @@ DEFAULTS = {
 
 def default_state():
     return {"version": 1, "moba_exe": "", "active_profile": "기본 설정",
-            "profiles": {"기본 설정": copy.deepcopy(DEFAULTS)}, "connections": [], "favorite_keys": []}
+            "profiles": {"기본 설정": copy.deepcopy(DEFAULTS)}, "connections": [], "favorite_keys": [],
+            "theme": "purple", "custom_accent": "#a475fb"}
 
 
 def key_identity(path):
@@ -224,6 +225,24 @@ class Store:
     def favorite_key(self, path):
         identity = key_identity(path)
         return next((item for item in self.state["favorite_keys"] if key_identity(item["path"]) == identity), None)
+
+    def key_label(self, path):
+        favorite = self.favorite_key(path) if path else None
+        return favorite["name"] if favorite else str(path)
+
+    def set_theme(self, theme, accent=None):
+        if theme not in ("purple", "blue", "teal", "amber", "rose", "slate", "light", "custom"):
+            raise ValueError("지원하지 않는 테마입니다.")
+        accent = accent or self.state["custom_accent"]
+        if not isinstance(accent, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', accent):
+            raise ValueError("테마 색상을 확인하세요.")
+        previous = self.state["theme"], self.state["custom_accent"]
+        self.state["theme"], self.state["custom_accent"] = theme, accent.lower()
+        try:
+            self.save()
+        except Exception:
+            self.state["theme"], self.state["custom_accent"] = previous
+            raise
 
     def add_favorite_key(self, path, name=None):
         path = safe_text(path, "SSH 키 경로")

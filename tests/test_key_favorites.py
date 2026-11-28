@@ -96,6 +96,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
         self.key = self.root / 'target-key'
         self.key.write_bytes(b'SYNTHETIC KEY FIXTURE')
         self.window = ui.MainWindow(self.store, dry_run=True, no_tray=True)
+        self.window.select_page(1)
         self.window.show()
         self.app.processEvents()
 
@@ -112,7 +113,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_browse_accept_prompts_once_and_shares_choices_across_forms(self):
-        picker = self.window.single_form.fields['key_path']
+        picker = self.window.settings_form.fields['key_path']
         with patch.object(ui.QFileDialog, 'getOpenFileName', return_value=(str(self.key), '')) as dialog, \
              patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes) as ask:
             picker.browse()
@@ -121,12 +122,12 @@ class FavoriteInterfaceTests(unittest.TestCase):
         self.assertEqual(ask.call_count, 1)
         self.assertEqual(picker.text(), str(self.key))
         self.assertEqual(core.Store(self.store.root).state['favorite_keys'][0]['path'], str(self.key))
-        for form in (self.window.single_form, self.window.settings_form):
+        for form in (self.window.settings_form,):
             for field in ('key_path', 'bastion_key_path'):
                 self.assertEqual(form.fields[field].combo.count(), 1)
 
     def test_decline_and_cancel_keep_selection_separate_from_favorites(self):
-        picker = self.window.single_form.fields['bastion_key_path']
+        picker = self.window.settings_form.fields['bastion_key_path']
         with patch.object(ui.QFileDialog, 'getOpenFileName', return_value=(str(self.key), '')), \
              patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.No):
             picker.browse()
@@ -139,7 +140,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
 
     def test_search_matches_alias_and_path_and_enter_selects_real_path(self):
         self.add_favorite()
-        picker = self.window.single_form.fields['key_path']
+        picker = self.window.settings_form.fields['key_path']
         for query in ('DUCT', 'target-key'):
             picker.setText('')
             picker.combo.setFocus()
@@ -147,11 +148,10 @@ class FavoriteInterfaceTests(unittest.TestCase):
             self.app.processEvents()
             completer = picker.combo.completer()
             self.assertEqual(completer.completionCount(), 1)
-            QTest.keyClick(completer.popup(), Qt.Key.Key_Down)
             QTest.keyClick(completer.popup(), Qt.Key.Key_Return)
             self.app.processEvents()
             self.assertEqual(picker.text(), str(self.key))
-            self.assertEqual(self.window.single_form.get_row()['key_path'], str(self.key))
+            self.assertEqual(self.window.settings_form.get_row()['key_path'], str(self.key))
 
     def test_same_filename_choices_keep_their_own_paths(self):
         other = self.root / 'other' / self.key.name
@@ -159,7 +159,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
         other.write_bytes(b'ANOTHER SYNTHETIC FIXTURE')
         self.add_favorite(name='Same name')
         self.add_favorite(other, 'Same name')
-        picker = self.window.single_form.fields['key_path']
+        picker = self.window.settings_form.fields['key_path']
         picker.choose_index(1)
         self.assertEqual(picker.text(), str(other))
         self.store.rename_favorite_key(self.key, 'Renamed')
@@ -168,7 +168,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
         self.assertIn('Renamed', picker.combo.itemText(0))
 
     def open_grid_key(self, row):
-        self.window.select_page(1)
+        self.window.select_page(0)
         self.app.processEvents()
         grid = self.window.grid
         if row % 2:
@@ -201,7 +201,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
         self.assertEqual(self.store.state['connections'][0]['key_path'], str(self.key))
 
     def test_bulk_folder_button_browses_without_premature_focus_commit(self):
-        self.window.select_page(1)
+        self.window.select_page(0)
         grid = self.window.grid
         grid.toggle_bastion(0)
         grid.setCurrentCell(1, 1)
@@ -223,7 +223,7 @@ class FavoriteInterfaceTests(unittest.TestCase):
 
     def test_manager_remove_refreshes_choices_but_keeps_current_input(self):
         self.add_favorite()
-        picker = self.window.single_form.fields['key_path']
+        picker = self.window.settings_form.fields['key_path']
         picker.choose_index(0)
         dialog = FavoriteKeysDialog(self.window.key_library, self.window)
         dialog.table.setCurrentCell(0, 0)
@@ -239,7 +239,6 @@ class FavoriteInterfaceTests(unittest.TestCase):
         QTest.keyClicks(picker.combo, 'DUCT')
         self.app.processEvents()
         popup = picker.combo.completer().popup()
-        QTest.keyClick(popup, Qt.Key.Key_Down)
         QTest.keyClick(popup, Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(picker.text(), str(self.key))
@@ -252,10 +251,11 @@ class FavoriteInterfaceTests(unittest.TestCase):
     def test_existing_missing_favorite_remains_available_but_registration_validates(self):
         self.add_favorite()
         self.key.unlink()
-        picker = self.window.single_form.fields['key_path']
+        picker = self.window.settings_form.fields['key_path']
         picker.choose_index(0)
-        self.window.host.setText('192.0.2.9')
-        self.window.connect_single()
+        self.window.grid.item(0, 1).setText('192.0.2.9')
+        self.window.grid.item(0, 5).setText(picker.text())
+        self.window.register_bulk()
         self.assertFalse(self.store.state['connections'])
         self.assertIn('파일을 찾을 수 없습니다', self.window.status.text())
         self.assertEqual(picker.combo.count(), 1)
