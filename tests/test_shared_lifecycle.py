@@ -126,6 +126,34 @@ class LifecycleTests(unittest.TestCase):
         body='$first=Enter-MobaRunLock '+q(self.device)+";$blocked=$false;try{try{$second=Enter-MobaRunLock "+q(self.device)+";$second.Dispose()}catch{$blocked=$true}}finally{$first.Dispose()};if(-not $blocked){throw 'Concurrent writer was allowed'};$third=Enter-MobaRunLock "+q(self.device)+';$third.Dispose()'
         self.assertTrue(self.ps(body)['ok']);self.assertTrue((self.device/'session-run.lock').exists())
 
+    def test_duplicate_click_activates_injected_app_without_touching_active_data(self):
+        before={p:p.read_bytes() for p in (self.pending,self.view,self.ini,self.source)}
+        activated=self.base/'activated'
+        result=self.ps('if(-not (Invoke-MobaExistingInstance -Directory '+q(self.device)+" -LauncherPath 'fixture' -OwnerProbe {[pscustomobject]@{Apps=1;Publishers=1}} -Activator {[IO.File]::WriteAllText("+q(activated)+",'activated')})){throw 'Existing app not handled'}")
+        self.assertTrue(result['ok'],result);self.assertTrue(activated.exists())
+        for p,data in before.items():self.assertEqual(p.read_bytes(),data)
+
+    def test_publisher_only_click_defers_without_activating_or_touching_data(self):
+        before={p:p.read_bytes() for p in (self.pending,self.view,self.ini,self.source)}
+        result=self.ps('if(-not (Invoke-MobaExistingInstance -Directory '+q(self.device)+" -LauncherPath 'fixture' -OwnerProbe {[pscustomobject]@{Apps=0;Publishers=1}} -Activator {throw 'Unexpected UI activation'})){throw 'Publisher not handled'}")
+        self.assertTrue(result['ok'],result)
+        for p,data in before.items():self.assertEqual(p.read_bytes(),data)
+
+    def test_no_active_owner_allows_normal_launch_without_activation(self):
+        result=self.ps('if(Invoke-MobaExistingInstance -Directory '+q(self.device)+" -LauncherPath 'fixture' -OwnerProbe {[pscustomobject]@{Apps=0;Publishers=0}} -Activator {throw 'Unexpected UI activation'}){throw 'Normal launch was blocked'}")
+        self.assertTrue(result['ok'],result)
+
+    def test_actual_ps5_sharing_violation_is_busy_but_other_io_errors_are_not(self):
+        body='$first=Enter-MobaRunLock '+q(self.device)+";try{try{$second=Enter-MobaRunLock "+q(self.device)+";throw 'Lock was not exclusive'}catch{if(-not $_.Exception.Data['MobaLauncherBusy']){throw 'Real sharing violation was not classified busy'}}}finally{$first.Dispose()}"
+        result=self.ps(body);self.assertTrue(result['ok'],result)
+        other=self.base/'bad-device';other.mkdir();(other/'session-run.lock').mkdir()
+        result=self.ps("$failed=$false;try{$unexpected=Enter-MobaRunLock "+q(other)+";$unexpected.Dispose()}catch{$failed=$true;if($_.Exception.Data['MobaLauncherBusy']){throw 'Non-sharing IO error was hidden'}};if(-not $failed){throw 'Expected a real file error'}")
+        self.assertTrue(result['ok'],result)
+
+    def test_attempt_ignore_requires_exact_cim_identity_and_contender_stage(self):
+        body='$attempt=Register-MobaAttempt '+q(self.device)+";$current=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID);$dir=Split-Path $attempt; & (Get-Module Session-Lifecycle) {param($entry,$dir) if(-not (Test-MobaContender $entry $dir)){throw 'Current contender was not recognized'};$fake=[pscustomobject]@{ProcessId=$entry.ProcessId;CreationDate=$entry.CreationDate.AddTicks(10)};if(Test-MobaContender $fake $dir){throw 'Reused PID identity was ignored'}} $current $dir;Set-MobaAttemptPublishing $attempt;& (Get-Module Session-Lifecycle) {param($entry,$dir) if(Test-MobaContender $entry $dir){throw 'Actual publisher was ignored'}} $current $dir"
+        result=self.ps(body);self.assertTrue(result['ok'],result)
+
     def fixture_deployment(self):
         sync=self.base/'synthetic-sync';app=sync/'convinient/MobaXterm';app.mkdir(parents=True)
         for name in ('Start-MobaXterm.ps1','Session-Lifecycle.psm1','Portable-SessionPaths.psm1'):shutil.copy2(SCRIPTS/name,app/name)
@@ -161,6 +189,9 @@ class LifecycleTests(unittest.TestCase):
         for p,content in before.items():self.assertEqual(p.read_bytes(),content)
 
     def test_real_launcher_recovers_then_completes_an_owned_synthetic_process(self):
+        import psutil
+        if any(p.info['name'].lower().startswith('mobaxterm') for p in psutil.process_iter(['name']) if p.info['name']):
+            self.skipTest('A real user MobaXterm is active; whole-launcher fixture runs in clean Windows CI')
         app,canonical,local,device=self.fixture_deployment()
         shutil.copy2(Path(os.environ['WINDIR'])/'System32/where.exe',app/'MobaXterm_Test.exe')
         result=subprocess.run([PS,'-NoLogo','-NoProfile','-File',str(app/'Start-MobaXterm.ps1'),'-NoDialogs'],env={**os.environ,'LOCALAPPDATA':str(local)},capture_output=True,timeout=30)
@@ -169,6 +200,86 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(canonical.read_bytes(),self.source.read_bytes())
         events=[json.loads(line)['event'] for line in (device/'lifecycle.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(events,['unchanged-pending-archived','run-started','application-started','application-exited','run-completed'])
+
+    def test_late_contender_retries_until_one_fresh_launcher_starts(self):
+        import psutil
+        if any(p.info['name'].lower().startswith('mobaxterm') for p in psutil.process_iter(['name']) if p.info['name']):
+            self.skipTest('Real MobaXterm is active; synchronized full launcher race runs in clean Windows CI')
+        app,canonical,local,device=self.fixture_deployment()
+        self.pending.unlink()  # Main recovery fixtures are unrelated to this fresh startup.
+        (device/'pending-edit.json').unlink()
+        script=app/'Start-MobaXterm.ps1'
+        text=script.read_text(encoding='utf-8-sig')
+        root=q(self.base)
+        text=text.replace('if(-not $PrepareOnly){$attempt=Register-MobaAttempt $localDir}',
+            "if($env:MOBA_FIXTURE_ROLE -eq 'B'){[IO.File]::WriteAllText((Join-Path "+root+" 'b-ready'),'ready');while(-not [IO.File]::Exists((Join-Path "+root+" 'release-b'))){Start-Sleep -Milliseconds 30}}\nif(-not $PrepareOnly){$attempt=Register-MobaAttempt $localDir}")
+        text=text.replace("if(-not $PrepareOnly -and $_.Exception.Data['MobaLauncherBusy']){",
+            "if(-not $PrepareOnly -and $_.Exception.Data['MobaLauncherBusy']){if($env:MOBA_FIXTURE_ROLE -eq 'B'){[IO.File]::WriteAllText((Join-Path "+root+" 'b-busy'),'busy')}")
+        text=text.replace("if($PrepareOnly){throw 'MobaXterm or its shared-session publisher is active. No files were replaced.'}",
+            "if($PrepareOnly){throw 'MobaXterm or its shared-session publisher is active. No files were replaced.'};if($env:MOBA_FIXTURE_ROLE -eq 'A'){[IO.File]::WriteAllText((Join-Path "+root+" 'a-returning'),'ready');while(-not [IO.File]::Exists((Join-Path "+root+" 'release-a'))){Start-Sleep -Milliseconds 30}}")
+        script.write_text(text,encoding='utf-8-sig')
+        exe=app/'MobaXterm_Fixture.exe'
+        compiled=self.ps("Add-Type -TypeDefinition 'using System.IO;using System.Threading;public static class Fixture{public static void Main(){File.AppendAllText(\"starts.fixture\",\"started\\n\");Thread.Sleep(1500);}}' -OutputAssembly "+q(exe)+' -OutputType WindowsApplication')
+        self.assertTrue(compiled['ok'],compiled)
+        children=[]
+        def start(role):
+            child=subprocess.Popen([PS,'-NoLogo','-NoProfile','-File',str(script),'-NoDialogs'],env={**os.environ,'LOCALAPPDATA':str(local),'MOBA_FIXTURE_ROLE':role},stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW)
+            children.append(child);return child
+        def wait_file(name):
+            end=time.monotonic()+12
+            while not (self.base/name).exists() and time.monotonic()<end:time.sleep(.03)
+            self.assertTrue((self.base/name).exists(),name)
+        try:
+            b=start('B');wait_file('b-ready')
+            a=start('A');wait_file('a-returning')
+            (self.base/'release-b').touch();wait_file('b-busy')
+            (self.base/'release-a').touch()
+            for child in children:
+                out,err=child.communicate(timeout=20)
+                self.assertEqual(child.returncode,0,(out+err).decode(errors='replace'))
+            self.assertEqual((app/'starts.fixture').read_text().splitlines(),['started'])
+            self.assertFalse((device/'pending-edit.json').exists())
+            self.assertEqual(canonical.read_bytes(),self.source.read_bytes())
+        finally:
+            for name in ('release-a','release-b'):(self.base/name).touch(exist_ok=True)
+            for child in children:
+                if child.poll() is None:
+                    try:child.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:child.kill();child.communicate()
+
+    def test_simultaneous_fresh_clicks_start_exactly_one_fixture_app(self):
+        import psutil
+        if any(p.info['name'].lower().startswith('mobaxterm') for p in psutil.process_iter(['name']) if p.info['name']):
+            self.skipTest('Real MobaXterm is active; fresh concurrent start runs in clean Windows CI')
+        app,canonical,local,device=self.fixture_deployment()
+        (device/'pending-edit.json').unlink()
+        script=app/'Start-MobaXterm.ps1'
+        text=script.read_text(encoding='utf-8-sig')
+        text=text.replace('if(-not $PrepareOnly){$attempt=Register-MobaAttempt $localDir}',
+            'if(-not $PrepareOnly){$attempt=Register-MobaAttempt $localDir};[IO.File]::WriteAllText((Join-Path '+q(self.base)+" ('ready-'+$env:MOBA_FIXTURE_ROLE)),'ready');while(-not [IO.File]::Exists((Join-Path "+q(self.base)+" 'go'))){Start-Sleep -Milliseconds 30}")
+        script.write_text(text,encoding='utf-8-sig')
+        compiled=self.ps("Add-Type -TypeDefinition 'using System.IO;using System.Threading;public static class Fixture{public static void Main(){File.AppendAllText(\"starts.fixture\",\"started\\n\");Thread.Sleep(3500);}}' -OutputAssembly "+q(app/'MobaXterm_Fixture.exe')+' -OutputType WindowsApplication')
+        self.assertTrue(compiled['ok'],compiled)
+        children=[]
+        try:
+            for role in ('A','B'):
+                children.append(subprocess.Popen([PS,'-NoLogo','-NoProfile','-File',str(script),'-NoDialogs'],env={**os.environ,'LOCALAPPDATA':str(local),'MOBA_FIXTURE_ROLE':role},stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW))
+            end=time.monotonic()+12
+            while not all((self.base/('ready-'+role)).exists() for role in ('A','B')) and time.monotonic()<end:time.sleep(.03)
+            self.assertTrue(all((self.base/('ready-'+role)).exists() for role in ('A','B')))
+            (self.base/'go').touch()
+            for child in children:
+                out,err=child.communicate(timeout=20)
+                self.assertEqual(child.returncode,0,(out+err).decode(errors='replace'))
+            self.assertEqual((app/'starts.fixture').read_text().splitlines(),['started'])
+            self.assertFalse((device/'pending-edit.json').exists())
+            self.assertEqual(canonical.read_bytes(),self.source.read_bytes())
+        finally:
+            (self.base/'go').touch(exist_ok=True)
+            for child in children:
+                if child.poll() is None:
+                    try:child.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:child.kill();child.communicate()
 
 
 if __name__=='__main__':unittest.main()

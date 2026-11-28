@@ -63,7 +63,7 @@ class InterfaceTests(unittest.TestCase):
         grid = self.window.grid
         self.store.profile["SSH"]["user"] = "operator"
         grid.set_rows([core.new_row(self.store.profile)])
-        grid.setCurrentCell(0, 0)
+        grid.setCurrentCell(0, 1)
         grid.paste_text("192.0.2.1\n192.0.2.2\n192.0.2.3")
         self.assertEqual(grid.logical_count(), 3)
         self.assertTrue(all(r["user"] == "operator" for r in grid.rows()))
@@ -72,11 +72,12 @@ class InterfaceTests(unittest.TestCase):
 
     def test_paste_protocol_updates_only_unpasted_defaults(self):
         grid = self.window.grid
+        grid.setCurrentCell(0, 1)
         grid.setCurrentCell(0, 0)
-        grid.paste_text("192.0.2.40\tRDP\tWindows Server\tDOMAIN\\user\t3390")
+        grid.paste_text("Windows Server\t192.0.2.40\tRDP\tDOMAIN\\user\t3390")
         row = grid.rows()[0]
         self.assertEqual((row["protocol"], row["user"], row["port"]), ("RDP", "DOMAIN\\user", "3390"))
-        grid.setCurrentCell(2, 0)
+        grid.setCurrentCell(2, 1)
         grid.paste_text("192.0.2.41\tRDP")
         row = grid.rows()[1]
         self.assertEqual((row["user"], row["port"]), ("Administrator", "3389"))
@@ -92,7 +93,7 @@ class InterfaceTests(unittest.TestCase):
         grid.undo()
         self.assertEqual(grid.rows()[1]["user"], "opc")
         grid.clearSelection()
-        grid.setCurrentCell(0, 0)
+        grid.setCurrentCell(0, 1)
         grid.duplicate_rows()
         self.assertEqual(grid.logical_count(), 4)
         self.assertEqual(grid.rows()[1]["host"], "192.0.2.1")
@@ -107,7 +108,7 @@ class InterfaceTests(unittest.TestCase):
         restored = core.Store(self.tmp.name)
         self.assertEqual(restored.profile["SSH"]["user"], "operator")
         self.assertEqual(restored.profile["RDP"]["port"], "3390")
-        self.window.grid.setCurrentCell(0, 0)
+        self.window.grid.setCurrentCell(0, 1)
         self.window.grid.paste_text("192.0.2.70")
         original = self.window.grid.rows()[0]
         self.store.state["profiles"]["다른 기본값"] = copy.deepcopy(core.DEFAULTS)
@@ -116,7 +117,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_invalid_bulk_is_atomic_and_visible_error(self):
         grid = self.window.grid
-        grid.setCurrentCell(0, 0)
+        grid.setCurrentCell(0, 1)
         grid.paste_text("192.0.2.1\n999.9.9.9")
         self.window.register_bulk()
         self.assertEqual(self.store.state["connections"], [])
@@ -124,7 +125,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_rdp_bulk_default_applies_to_empty_and_new_rows_only(self):
         grid = self.window.grid
-        grid.setCurrentCell(0, 0)
+        grid.setCurrentCell(0, 1)
         grid.paste_text("192.0.2.90")
         self.window.bulk_protocol.setCurrentText("RDP")
         self.assertEqual(grid.rows()[0]["protocol"], "SSH")
@@ -136,8 +137,8 @@ class InterfaceTests(unittest.TestCase):
         grid = self.window.grid
         self.window.select_page(1)
         self.app.processEvents()
-        grid.setCurrentCell(0, 0)
-        grid.editItem(grid.item(0, 0))
+        grid.setCurrentCell(0, 1)
+        grid.editItem(grid.item(0, 1))
         self.app.processEvents()
         editor = self.app.focusWidget()
         QTest.keyClicks(editor, "192.0.2.91")
@@ -161,15 +162,15 @@ class InterfaceTests(unittest.TestCase):
         self.window.select_page(1)
         self.app.processEvents()
         grid = self.window.grid
-        grid.setCurrentCell(0, 0)
-        grid.editItem(grid.item(0, 0))
+        grid.setCurrentCell(0, 1)
+        grid.editItem(grid.item(0, 1))
         self.app.processEvents()
         editor = self.app.focusWidget()
         QTest.keyClicks(editor, "192.0.2.45")
         QTest.keyClick(editor, Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(grid.rows()[0]["host"], "192.0.2.45")
-        self.assertEqual((grid.currentRow(), grid.currentColumn()), (2, 0))
+        self.assertEqual((grid.currentRow(), grid.currentColumn()), (2, 1))
         QTest.keyClick(grid, Qt.Key.Key_1)
         self.app.processEvents()
         editor = self.app.focusWidget()
@@ -177,18 +178,20 @@ class InterfaceTests(unittest.TestCase):
         QTest.keyClick(editor, Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(grid.rows()[1]["host"], "192.0.2.46")
-        self.assertEqual((grid.currentRow(), grid.currentColumn()), (4, 0))
+        self.assertEqual((grid.currentRow(), grid.currentColumn()), (4, 1))
 
     def test_enter_on_last_row_creates_next_input_row(self):
         grid = self.window.grid
-        grid.setCurrentCell(grid.rowCount() - 2, 0)
+        grid.setCurrentCell(grid.rowCount() - 2, 1)
         count = grid.logical_count()
         QTest.keyClick(grid, Qt.Key.Key_Return)
         self.assertEqual(grid.logical_count(), count + 1)
-        self.assertEqual((grid.currentRow(), grid.currentColumn()), (count * 2, 0))
+        self.assertEqual((grid.currentRow(), grid.currentColumn()), (count * 2, 1))
 
     def mouse_drag_handle(self, seed, final_row, *, ctrl=False, layer=0):
         grid = self.window.grid
+        if layer:
+            grid.set_bastion(True)
         grid.clearSelection()
         grid.setCurrentCell(seed[0] * 2 + layer, seed[1])
         grid.clearSelection()
@@ -253,11 +256,11 @@ class InterfaceTests(unittest.TestCase):
         self.window.select_page(1)
         grid = self.window.grid
         self.assertEqual(grid.columnCount(), 7)
-        self.assertEqual(grid.item(1, 2).text(), "Bastion")
+        self.assertEqual(grid.item(1, 0).text(), "Bastion")
         self.assertNotEqual(grid.item(0, 0).background(), grid.item(1, 0).background())
-        grid.setCurrentCell(0, 0)
+        grid.setCurrentCell(0, 1)
         grid.paste_text("192.0.2.51\n192.0.2.52")
-        grid.item(1, 0).setText("198.51.100.5")
+        grid.item(1, 1).setText("198.51.100.5")
         grid.item(1, 3).setText("jumpuser")
         self.window.register_bulk()
         records = self.store.state["connections"]
@@ -268,7 +271,8 @@ class InterfaceTests(unittest.TestCase):
     def test_jump_paste_and_enter_stay_in_jump_rows(self):
         self.window.select_page(1)
         grid = self.window.grid
-        grid.setCurrentCell(1, 0)
+        grid.set_bastion(True)
+        grid.setCurrentCell(1, 1)
         grid.paste_text("198.51.100.1\n198.51.100.2")
         QTest.keyClick(grid, Qt.Key.Key_Return)
         self.assertEqual(grid.currentRow(), 3)
@@ -281,15 +285,16 @@ class InterfaceTests(unittest.TestCase):
         rows = grid.rows()
         rows[0].update(host="192.0.2.1", bastion_host="198.51.100.1")
         grid.set_rows(rows)
-        self.mouse_drag_handle((0, 0, 0, 0), 3, ctrl=True, layer=1)
+        self.mouse_drag_handle((0, 1, 0, 1), 3, ctrl=True, layer=1)
         self.assertEqual([row["bastion_host"] for row in grid.rows()[:4]], ["198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"])
         self.assertEqual([row["host"] for row in grid.rows()[:4]], ["192.0.2.1", "", "", ""])
 
     def test_pair_duplicate_delete_and_hide_preserve_bastion_data(self):
         grid = self.window.grid
-        grid.item(0, 0).setText("192.0.2.61")
-        grid.item(1, 0).setText("198.51.100.6")
-        grid.setCurrentCell(1, 0)
+        grid.item(0, 1).setText("192.0.2.61")
+        grid.item(1, 1).setText("198.51.100.6")
+        grid.set_bastion(True)
+        grid.setCurrentCell(1, 1)
         grid.duplicate_rows()
         self.assertEqual(grid.rows()[1]["bastion_host"], "198.51.100.6")
         grid.delete_rows()

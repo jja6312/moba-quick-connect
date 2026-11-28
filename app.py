@@ -6,21 +6,24 @@ import copy
 import csv
 import os
 from pathlib import Path
+import re
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QSize, QRect, QEvent, QObject, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut
+from PySide6.QtCore import Qt, QTimer, QSize, QRect, QPoint, QEvent, QObject, QThread, Signal, Slot, QPersistentModelIndex
+from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyledItemDelegate,
-    QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QVBoxLayout, QWidget)
+    QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QVBoxLayout, QWidget)
 
 import core
 import fill as spreadsheet_fill
 import integration
+import portable
 from windows import ScopedHotkey, discover_moba, reveal_window
+from key_picker import KeyLibrary, KeyPicker, FavoriteKeysDialog
 
 
 STYLE = """
@@ -149,7 +152,7 @@ def card():
 
 
 class ConnectionForm(QWidget):
-    def __init__(self, parent=None, *, address_widgets=None):
+    def __init__(self, parent=None, *, address_widgets=None, key_library=None):
         super().__init__(parent)
         self.kind = "SSH"
         self.fields = {}
@@ -169,6 +172,8 @@ class ConnectionForm(QWidget):
             grid.addWidget(label(title, "muted"), row * 2, col)
             widget = address_widgets[("host", "protocol").index(key)] if key in ("host", "protocol") else line(hint)
             widget.setAccessibleName(title)
+            if key in ("name", "host"):
+                widget.editingFinished.connect(lambda widget=widget: widget.setText(widget.text().strip()))
             if key not in ("host", "protocol"):
                 self.fields[key] = widget
             grid.addWidget(widget, row * 2 + 1, col)
@@ -180,16 +185,19 @@ class ConnectionForm(QWidget):
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_layout.setSpacing(4)
         key_layout.addWidget(label("SSH 키", "muted"))
-        key_row = QHBoxLayout()
-        self.fields["key_path"] = line("키 파일 선택 — 비워두면 MobaXterm에서 인증")
+        self.fields["key_path"] = KeyPicker(key_library, self)
         self.fields["key_path"].setAccessibleName("SSH 키 경로")
-        key_row.addWidget(self.fields["key_path"], 1)
-        key_row.addWidget(button("찾기", lambda: self.pick_key("key_path")))
-        key_layout.addLayout(key_row)
+        key_layout.addWidget(self.fields["key_path"])
         outer.addWidget(self.key_widget)
         self.jump = QCheckBox("Bastion 사용")
         self.jump.setAccessibleName("Bastion 사용")
-        outer.addWidget(self.jump)
+        jump_header = QHBoxLayout()
+        jump_header.addWidget(self.jump)
+        jump_header.addStretch(1)
+        self.jump_expand = button("▸ Bastion 펼치기", name="quiet")
+        self.jump_expand.setCheckable(True)
+        jump_header.addWidget(self.jump_expand)
+        outer.addLayout(jump_header)
         self.jump_panel = QFrame()
         jump_grid = QGridLayout(self.jump_panel)
         jump_grid.setContentsMargins(0, 4, 0, 0)
@@ -202,30 +210,31 @@ class ConnectionForm(QWidget):
             ("bastion_key_path", "Bastion 키", "키 파일 경로"))):
             r, c = divmod(index, 2)
             jump_grid.addWidget(label(title, "muted"), r * 2, c)
-            self.fields[key] = line(hint)
+            self.fields[key] = KeyPicker(key_library, self) if key == "bastion_key_path" else line(hint)
             self.fields[key].setAccessibleName(title)
             if key == "bastion_key_path":
-                row = QHBoxLayout()
-                row.addWidget(self.fields[key], 1)
-                row.addWidget(button("찾기", lambda: self.pick_key("bastion_key_path")))
-                jump_grid.addLayout(row, r * 2 + 1, c)
+                jump_grid.addWidget(self.fields[key], r * 2 + 1, c)
             else:
                 jump_grid.addWidget(self.fields[key], r * 2 + 1, c)
         outer.addWidget(self.jump_panel)
-        self.jump.toggled.connect(self.jump_panel.setVisible)
+        self.fields["bastion_host"].editingFinished.connect(lambda: self.fields["bastion_host"].setText(self.fields["bastion_host"].text().strip()))
+        self.jump_expand.toggled.connect(self.jump_panel.setVisible)
+        self.jump_expand.toggled.connect(lambda expanded: self.jump_expand.setText("▾ Bastion 접기" if expanded else "▸ Bastion 펼치기"))
+        self.jump.toggled.connect(self.jump_expand.setChecked)
         self.jump_panel.hide()
 
     def pick_key(self, key):
-        path, _ = QFileDialog.getOpenFileName(self, "키 파일 선택", "", "모든 파일 (*)")
-        if path:
-            self.fields[key].setText(path.replace("/", "\\"))
+        self.fields[key].browse()
 
     def set_row(self, row):
         self.kind = row.get("protocol", "SSH")
         for key, widget in self.fields.items():
             widget.setText(str(row.get(key, "")))
         self.key_widget.setVisible(self.kind == "SSH")
+        self.jump.blockSignals(True)
         self.jump.setChecked(bool(row.get("bastion_host")))
+        self.jump.blockSignals(False)
+        self.jump_expand.setChecked(False)
 
     def get_row(self):
         result = {key: widget.text().strip() for key, widget in self.fields.items()}
@@ -237,6 +246,8 @@ class ConnectionForm(QWidget):
 
 class ProtocolDelegate(QStyledItemDelegate):
     def eventFilter(self, editor, event):
+        if isinstance(editor, KeyPicker):
+            return False  # Composite editor owns its child focus/completion events.
         if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.modifiers():
             table = self.parent()
             row, col = table.currentRow(), table.currentColumn()
@@ -247,15 +258,58 @@ class ProtocolDelegate(QStyledItemDelegate):
         return super().eventFilter(editor, event)
 
     def createEditor(self, parent, option, index):
-        if index.row() % 2 == 0 and index.column() == 1:
+        if index.column() == 5:
+            editor = KeyPicker(self.parent().key_library, parent, table_editor=True)
+            persistent = QPersistentModelIndex(index)
+            editor.advance.connect(lambda: self.finish_key(editor, persistent, True))
+            editor.finished.connect(lambda: self.finish_key(editor, persistent, False))
+            return editor
+        if index.row() % 2 == 0 and self.parent().field_at(index.row(), index.column()) == "protocol":
             editor = QComboBox(parent)
             editor.addItems(["SSH", "RDP"])
             return editor
         return super().createEditor(parent, option, index)
 
+    def finish_key(self, editor, index, advance=False):
+        if editor.closed or not index.isValid():
+            return
+        editor.closed = True
+        row, col = index.row(), index.column()
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.NoHint)
+        if advance:
+            QTimer.singleShot(0, lambda: self.parent().move_down(row, col))
+
     def paint(self, painter, option, index):
+        if not index.row() % 2 and index.column() == 0:
+            painter.save()
+            selected = bool(option.state & QApplication.style().StateFlag.State_Selected)
+            painter.fillRect(option.rect, QColor("#493367" if selected else "#1d1b29"))
+            painter.setPen(QColor("#eeecf7"))
+            rect = option.rect.adjusted(5, 0, -25, 0)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             option.fontMetrics.elidedText(index.data() or "", Qt.TextElideMode.ElideRight, max(0, rect.width())))
+            expanded = index.row() // 2 in self.parent().expanded_rows
+            painter.setPen(QColor("#b68aff"))
+            painter.drawText(option.rect.adjusted(option.rect.width() - 24, 0, 0, 0), Qt.AlignmentFlag.AlignCenter, "▾" if expanded else "▸")
+            painter.restore()
+            return
+        if index.column() == 5:
+            selected = bool(option.state & QApplication.style().StateFlag.State_Selected) and index.row() % 2 == self.parent().currentRow() % 2
+            painter.save()
+            painter.fillRect(option.rect, QColor("#493367" if selected else "#2b233a" if index.row() % 2 else "#1d1b29"))
+            painter.setFont(option.font)
+            painter.setPen(QColor("#cfb9ec" if index.data() else "#8f7da9"))
+            text = index.data() or ("Bastion 키" if index.row() % 2 else "키 선택")
+            rect = option.rect.adjusted(5, 0, -26, 0)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideMiddle, max(0, rect.width())))
+            self.parent().style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon).paint(
+                painter, QRect(option.rect.right() - 21, option.rect.center().y() - 8, 16, 16))
+            painter.restore()
+            return
         if index.row() % 2:
-            text = index.data() or {0: "Bastion IP", 3: "사용자", 4: "22", 5: "Bastion 키"}.get(index.column(), "")
+            text = index.data() or {1: "Bastion IP", 3: "사용자", 4: "22", 5: "Bastion 키"}.get(index.column(), "")
             selected = bool(option.state & QApplication.style().StateFlag.State_Selected) and self.parent().currentRow() % 2 == 1
             painter.save()
             painter.fillRect(option.rect, QColor("#493367" if selected else "#2b233a"))
@@ -270,26 +324,93 @@ class ProtocolDelegate(QStyledItemDelegate):
             option.state &= ~QApplication.style().StateFlag.State_Selected
         super().paint(painter, option, index)
 
+    def editorEvent(self, event, model, option, index):
+        if not index.row() % 2 and index.column() == 0 and event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton and event.position().x() >= option.rect.right() - 25:
+            self.parent().toggle_bastion(index.row() // 2)
+            return True
+        if index.column() == 5 and event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton and event.position().x() >= option.rect.right() - 25:
+            table = self.parent()
+            table.commit_editor()
+            table.setCurrentIndex(index)
+            table.edit(index)
+            QTimer.singleShot(0, lambda: self.browse_current_key(index))
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    def browse_current_key(self, index):
+        table = self.parent()
+        if table.currentIndex() == index:
+            for editor in table.viewport().findChildren(KeyPicker):
+                if editor.isVisible() and not editor.closed:
+                    editor.browse()
+                    break
+
     def setEditorData(self, editor, index):
-        if isinstance(editor, QComboBox):
+        if isinstance(editor, KeyPicker):
+            editor.setText(index.data() or "")
+        elif isinstance(editor, QComboBox):
             editor.setCurrentText(index.data() or "SSH")
         else:
             super().setEditorData(editor, index)
 
     def setModelData(self, editor, model, index):
-        if isinstance(editor, QComboBox):
+        if isinstance(editor, KeyPicker):
+            model.setData(index, editor.text())
+        elif isinstance(editor, QComboBox):
             model.setData(index, editor.currentText())
         else:
             super().setModelData(editor, model, index)
 
 
-class ConnectionGrid(QTableWidget):
-    MAIN_FIELDS = core.FIELDS[:7]
-    JUMP_FIELDS = ("bastion_host", None, None, "bastion_user", "bastion_port", "bastion_key_path", None)
+class ConnectionRowHeader(QHeaderView):
+    def __init__(self, table):
+        super().__init__(Qt.Orientation.Vertical, table)
+        self.table = table
+        self.anchor = None
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        image = QPixmap(24, 24)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setPen(QPen(QColor("#eee7ff"), 1))
+        painter.setBrush(QColor("#282033"))
+        painter.drawPolygon(QPolygon([QPoint(3, 8), QPoint(13, 8), QPoint(13, 3), QPoint(22, 12), QPoint(13, 21), QPoint(13, 16), QPoint(3, 16)]))
+        painter.end()
+        self.viewport().setCursor(QCursor(image, 21, 12))
+        self.setToolTip("클릭/드래그: 연결 전체 선택\nCtrl+C: 숨긴 Bastion까지 복사")
 
-    def __init__(self, profile, protocol=lambda: "SSH", parent=None):
+    def mousePressEvent(self, event):
+        section = self.logicalIndexAt(event.position().toPoint())
+        if section >= 0 and event.button() == Qt.MouseButton.LeftButton:
+            self.anchor = section // 2
+            self.table.select_connection_rows(self.anchor, self.anchor, event.modifiers())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        section = self.logicalIndexAt(event.position().toPoint())
+        if self.anchor is not None and section >= 0 and event.buttons() & Qt.MouseButton.LeftButton:
+            self.table.select_connection_rows(self.anchor, section // 2)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.anchor = None
+        super().mouseReleaseEvent(event)
+
+
+class ConnectionGrid(QTableWidget):
+    bastionVisibilityChanged = Signal(bool)
+    MAIN_FIELDS = ("name", "host", "protocol", *core.FIELDS[3:7])
+    JUMP_FIELDS = (None, "bastion_host", None, "bastion_user", "bastion_port", "bastion_key_path", None)
+    FULL_FIELDS = (*MAIN_FIELDS, *core.FIELDS[7:])
+
+    def __init__(self, profile, protocol=lambda: "SSH", parent=None, *, key_library=None):
         super().__init__(0, len(self.MAIN_FIELDS), parent)
         self.profile = profile
+        self.key_library = key_library
         self.protocol = protocol
         self.history = []
         self.mutating = False
@@ -298,28 +419,32 @@ class ConnectionGrid(QTableWidget):
         self.drag_before = None
         self.drag_series = False
         self.drag_position = None
-        self.bastion_visible = True
+        self.bastion_visible = False
+        self.expanded_rows = set()
+        self.whole_rows = set()
         self.drag_layer = 0
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.scroll_timer = QTimer(self)
         self.scroll_timer.setInterval(90)
         self.scroll_timer.timeout.connect(self.drag_autoscroll)
-        self.setHorizontalHeaderLabels(core.HEADERS[:7])
+        self.setHorizontalHeaderLabels([dict(zip(core.FIELDS, core.HEADERS))[f] for f in self.MAIN_FIELDS])
         self.setAlternatingRowColors(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed |
                              QAbstractItemView.EditTrigger.AnyKeyPressed | QAbstractItemView.EditTrigger.SelectedClicked)
         self.setItemDelegate(ProtocolDelegate(self))
-        for index, width in enumerate((140, 58, 130, 95, 52, 170, 130)):
+        for index, width in enumerate((160, 140, 58, 95, 52, 170, 130)):
             self.setColumnWidth(index, width)
+        self.setVerticalHeader(ConnectionRowHeader(self))
         self.verticalHeader().setDefaultSectionSize(30)
         self.verticalHeader().setMinimumSectionSize(26)
         self.verticalHeader().setFixedWidth(32)
         self.horizontalHeader().setStretchLastSection(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.itemChanged.connect(self.on_item_changed)
+        self.cellPressed.connect(lambda *_: self.whole_rows.clear())
         self.append_rows(8, record=False)
         self.previous = self.rows()
         for keys, handler in (("Ctrl+V", self.paste), ("Ctrl+C", self.copy), ("Ctrl+D", self.fill_down),
@@ -338,10 +463,36 @@ class ConnectionGrid(QTableWidget):
     def set_bastion(self, enabled):
         self.commit_editor()
         self.bastion_visible = enabled
+        self.expanded_rows = set(range(self.logical_count())) if enabled else set()
         for row in range(1, self.rowCount(), 2):
             self.setRowHidden(row, not enabled)
         if not enabled and self.currentRow() % 2:
             self.setCurrentCell(self.currentRow() - 1, max(0, self.currentColumn()))
+        self.bastionVisibilityChanged.emit(bool(enabled))
+        self.viewport().update()
+
+    def toggle_bastion(self, row):
+        self.commit_editor()
+        if row in self.expanded_rows:
+            self.expanded_rows.remove(row)
+        else:
+            self.expanded_rows.add(row)
+        self.setRowHidden(row * 2 + 1, row not in self.expanded_rows)
+        self.bastion_visible = len(self.expanded_rows) == self.logical_count()
+        self.bastionVisibilityChanged.emit(self.bastion_visible)
+        self.viewport().update()
+
+    def select_connection_rows(self, first, last, modifiers=Qt.KeyboardModifier.NoModifier):
+        self.commit_editor()
+        picked = set(range(min(first, last), max(first, last) + 1))
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            picked ^= self.whole_rows
+        self.setCurrentCell(last * 2, 0)
+        self.clearSelection()
+        for row in sorted(picked):
+            self.setRangeSelected(QTableWidgetSelectionRange(row * 2, 0, row * 2 + 1, self.columnCount() - 1), True)
+        self.whole_rows = picked
+        self.setFocus()
 
     def field_at(self, row, column):
         return (self.JUMP_FIELDS if row % 2 else self.MAIN_FIELDS)[column]
@@ -366,6 +517,10 @@ class ConnectionGrid(QTableWidget):
         self.history = self.history[-50:]
 
     def set_rows(self, rows):
+        if self.bastion_visible:
+            self.expanded_rows = set(range(len(rows)))
+        self.expanded_rows.intersection_update(range(len(rows)))
+        self.whole_rows.clear()
         self.mutating = True
         self.setRowCount(len(rows) * 2)
         for r, row in enumerate(rows):
@@ -374,16 +529,20 @@ class ConnectionGrid(QTableWidget):
                 self.setVerticalHeaderItem(physical, QTableWidgetItem("" if layer else str(r + 1)))
                 self.setRowHeight(physical, 28 if layer else 32)
                 for c, field in enumerate(fields):
-                    item = QTableWidgetItem(str(row.get(field, "")) if field else ("Bastion" if c == 2 else ""))
+                    value = str(row.get(field, ""))
+                    if field in ("name", "host", "bastion_host"):
+                        value = value.strip()
+                    item = QTableWidgetItem(value if field else ("Bastion" if c == 0 else ""))
                     if layer:
                         item.setBackground(QColor("#2b233a"))
                         item.setForeground(QColor("#cfb9ec") if field else QColor("#9780b6"))
                     if not field:
                         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                     self.setItem(physical, c, item)
-                self.setRowHidden(physical, bool(layer and not self.bastion_visible))
+                self.setRowHidden(physical, bool(layer and r not in self.expanded_rows))
         self.mutating = False
         self.previous = self.rows()
+        self.bastionVisibilityChanged.emit(bool(rows) and len(self.expanded_rows) == len(rows))
 
     def append_rows(self, count=1, *, record=True):
         if self.logical_count() + count > 2000:
@@ -397,7 +556,11 @@ class ConnectionGrid(QTableWidget):
         if self.mutating:
             return
         self.remember()
-        if item.row() % 2 == 0 and item.column() == 1 and item.text().upper() in core.DEFAULTS:
+        if self.field_at(item.row(), item.column()) in ("name", "host", "bastion_host"):
+            self.mutating = True
+            item.setText(item.text().strip())
+            self.mutating = False
+        if item.row() % 2 == 0 and self.field_at(item.row(), item.column()) == "protocol" and item.text().upper() in core.DEFAULTS:
             rows = self.rows()
             old = rows[item.row() // 2]
             fresh = core.new_row(self.profile(), item.text().upper())
@@ -414,6 +577,10 @@ class ConnectionGrid(QTableWidget):
         physical, c0 = max(0, self.currentRow()), max(0, self.currentColumn())
         r0, layer = divmod(physical, 2)
         fields = self.JUMP_FIELDS if layer else self.MAIN_FIELDS
+        if not layer and c0 == 0 and all(len(r) == 1 and re.fullmatch(r'[0-9a-fA-F:.]+', r[0].strip()) for r in matrix):
+            c0 = 1
+        if not layer and c0 == 0 and all(len(r) == len(self.FULL_FIELDS) for r in matrix):
+            fields = self.FULL_FIELDS
         if r0 + len(matrix) > 2000 or c0 + max(map(len, matrix), default=0) > len(fields):
             raise ValueError("붙여넣을 범위가 표의 최대 크기를 넘습니다.")
         self.remember()
@@ -425,13 +592,13 @@ class ConnectionGrid(QTableWidget):
                 field = fields[c0 + dx]
                 if field:
                     rows[r0 + dy][field] = value.strip()
-            if not layer and c0 <= 1 < c0 + len(values):
+            if not layer and c0 <= 2 < c0 + len(values):
                 kind = rows[r0 + dy]["protocol"].upper()
                 if kind in core.DEFAULTS:
                     old = self.previous[r0 + dy] if r0 + dy < len(self.previous) else core.new_row(self.profile(), self.protocol())
                     for field in ("user", "port", "key_path", "bastion_host", "bastion_user", "bastion_port", "bastion_key_path"):
-                        col = core.FIELDS.index(field)
-                        if not c0 <= col < c0 + len(values) and rows[r0 + dy][field] == old[field]:
+                        pasted_fields = set(fields[c0:c0 + len(values)])
+                        if field not in pasted_fields and rows[r0 + dy][field] == old[field]:
                             rows[r0 + dy][field] = self.profile()[kind][field]
                     rows[r0 + dy]["protocol"] = kind
         self.set_rows(rows)
@@ -444,6 +611,15 @@ class ConnectionGrid(QTableWidget):
             QMessageBox.warning(self, "붙여넣기", str(exc))
 
     def copy(self):
+        self.commit_editor()
+        if self.whole_rows:
+            import io
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t", lineterminator="\r\n")
+            rows = self.rows()
+            writer.writerows([[rows[r].get(f, "") for f in self.FULL_FIELDS] for r in sorted(self.whole_rows)])
+            QApplication.clipboard().setText(output.getvalue().rstrip("\r\n"))
+            return
         selected = self.selectedRanges()
         if not selected:
             return
@@ -482,22 +658,38 @@ class ConnectionGrid(QTableWidget):
             new = copy.deepcopy(rows[r])
             new["name"] = ""
             rows.insert(r + 1, new)
+        expanded = set()
+        for r in self.expanded_rows:
+            moved = r + sum(i < r for i in chosen)
+            expanded.add(moved)
+            if r in chosen:
+                expanded.add(moved + 1)
+        self.expanded_rows = expanded
         self.set_rows(rows)
         self.setCurrentCell((chosen[0] + 1) * 2, 0)
 
     def delete_rows(self):
         chosen = {i.row() // 2 for i in self.selectedIndexes()}
         self.remember()
+        self.expanded_rows = {r - sum(i < r for i in chosen) for r in self.expanded_rows if r not in chosen}
         self.set_rows([row for r, row in enumerate(self.rows()) if r not in chosen] or [core.new_row(self.profile(), self.protocol())])
 
     def commit_editor(self):
         editor = QApplication.focusWidget()
+        candidate = editor
+        while candidate is not None and candidate != self:
+            if isinstance(candidate, KeyPicker):
+                delegate = self.itemDelegateForIndex(self.currentIndex())
+                delegate.finish_key(candidate, self.currentIndex())
+                return
+            candidate = candidate.parentWidget()
         if self.state() == QAbstractItemView.State.EditingState and isinstance(editor, (QLineEdit, QComboBox)):
             delegate = self.itemDelegateForIndex(self.currentIndex())
             delegate.commitData.emit(editor)
             delegate.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.NoHint)
 
     def move_down(self, row=None, column=None):
+        self.whole_rows.clear()
         row = self.currentRow() if row is None else row
         column = self.currentColumn() if column is None else column
         if row < 0:
@@ -645,9 +837,12 @@ class ConnectionGrid(QTableWidget):
         fields = self.JUMP_FIELDS if layer else self.MAIN_FIELDS
         # Reserved cells in the Bastion row are display-only. Fill a temporary
         # matrix and copy back editable fields, preserving the connection above.
-        fill_fields = tuple(field or f"_reserved_{col}" for col, field in enumerate(fields))
+        whole = bool(self.whole_rows and seed[1] == 0 and seed[3] == self.columnCount() - 1)
+        fill_fields = self.FULL_FIELDS if whole else tuple(field or f"_reserved_{col}" for col, field in enumerate(fields))
         matrix = [{**row, **{field: "" for field in fill_fields if field.startswith("_reserved_")}} for row in rows]
-        result = spreadsheet_fill.fill(matrix, fill_fields, seed, target, series=series)
+        fill_seed = (seed[0], 0, seed[2], len(fill_fields) - 1) if whole else seed
+        fill_target = (target[0], 0, target[2], len(fill_fields) - 1) if whole else target
+        result = spreadsheet_fill.fill(matrix, fill_fields, fill_seed, fill_target, series=series)
         result = [{field: row[field] for field in core.FIELDS} for row in result]
         self.history.append(copy.deepcopy(before))
         self.history = self.history[-50:]
@@ -655,6 +850,8 @@ class ConnectionGrid(QTableWidget):
         self.setCurrentCell(target[0] * 2 + layer, target[1])
         self.clearSelection()
         self.setRangeSelected(QTableWidgetSelectionRange(target[0] * 2 + layer, target[1], target[2] * 2 + layer, target[3]), True)
+        if whole:
+            self.whole_rows = set(range(target[0], target[2] + 1))
         self.viewport().update()
 
     def mouseReleaseEvent(self, event):
@@ -730,6 +927,7 @@ class MainWindow(QMainWindow):
     def __init__(self, store, *, dry_run=False, no_tray=False):
         super().__init__()
         self.store, self.dry_run, self.no_tray = store, dry_run, no_tray
+        self.key_library = KeyLibrary(store, self)
         self.quitting = False
         self.hotkey = None
         self.registration_thread = None
@@ -766,6 +964,15 @@ class MainWindow(QMainWindow):
         self.profiles.setMaximumWidth(180)
         header.addWidget(self.profiles)
         header.addWidget(button("+", self.new_profile, "quiet"))
+        files = button("파일", name="quiet")
+        menu = QMenu(files)
+        menu.addAction("연결 가져오기", self.import_package)
+        menu.addAction("입력한 연결 내보내기 (키 포함)", self.export_current_package)
+        menu.addAction("등록 기록 내보내기 (키 포함)", lambda: self.perform(lambda: self.export_package_rows(self.store.state["connections"])))
+        menu.addAction("MobaXterm 세션 파일만 내보내기", self.export_bulk)
+        files.setMenu(menu)
+        header.addWidget(files)
+        header.addWidget(button("즐겨찾는 키", self.manage_keys, "quiet"))
         header.addWidget(button("기본값 설정", lambda: self.select_page(2), "quiet"))
         header.addWidget(button("숨기기", self.hide, "quiet"))
         body.addLayout(header)
@@ -818,7 +1025,7 @@ class MainWindow(QMainWindow):
         self.single_card, card_layout = card()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        self.single_form = ConnectionForm(address_widgets=(self.host, self.single_protocol))
+        self.single_form = ConnectionForm(address_widgets=(self.host, self.single_protocol), key_library=self.key_library)
         scroll.setWidget(self.single_form)
         card_layout.addWidget(scroll)
         outer.addWidget(self.single_card, 1)
@@ -852,27 +1059,74 @@ class MainWindow(QMainWindow):
         self.details.setChecked(True)
         self.details.toggled.connect(lambda checked: self.grid.set_details(checked))
         controls.addWidget(self.details)
-        self.bastion_rows = QCheckBox("Bastion")
-        self.bastion_rows.setChecked(True)
-        self.bastion_rows.setToolTip("연결 바로 아래에 Bastion 행 표시")
+        self.bastion_rows = button("Bastion 모두 펼치기")
+        self.bastion_rows.setCheckable(True)
+        self.bastion_rows.setToolTip("연결 이름 오른쪽 화살표로 개별 펼치기")
         self.bastion_rows.toggled.connect(lambda checked: self.grid.set_bastion(checked))
         controls.addWidget(self.bastion_rows)
         outer.addLayout(controls)
-        self.grid = ConnectionGrid(lambda: self.store.profile, lambda: self.bulk_protocol.currentText())
+        self.grid = ConnectionGrid(lambda: self.store.profile, lambda: self.bulk_protocol.currentText(), key_library=self.key_library)
+        self.grid.bastionVisibilityChanged.connect(self.sync_bastion_button)
         self.grid.set_details(self.details.isChecked())
         self.grid.setAccessibleName("일괄 연결 입력 표")
         outer.addWidget(self.grid, 1)
         hints = QHBoxLayout()
-        hints.addWidget(label("Enter 다음 행   드래그 복사   Ctrl+드래그 번호 +1", "muted"), 1)
+        hints.addWidget(label("Enter 다음 행   드래그 복사   Ctrl+드래그 +1   행 번호: 연결 전체 선택", "muted"), 1)
         outer.addLayout(hints)
         actions = QHBoxLayout()
         actions.addWidget(button("CSV 불러오기", self.import_csv))
-        actions.addWidget(button("세션 파일 내보내기", self.export_bulk))
+        actions.addWidget(button("가져오기", self.import_package))
+        export = button("내보내기 (키 포함)", self.export_current_package)
+        export.setToolTip("연결의 키 파일을 ZIP에 포함합니다. 내보낸 파일은 암호화되지 않습니다.")
+        actions.addWidget(export)
         actions.addStretch(1)
         self.bulk_action = button("일괄 추가", self.register_bulk, "primary")
         actions.addWidget(self.bulk_action)
         outer.addLayout(actions)
         self.pages.addWidget(page)
+
+    def sync_bastion_button(self, expanded):
+        self.bastion_rows.blockSignals(True)
+        self.bastion_rows.setChecked(expanded)
+        self.bastion_rows.setText("Bastion 모두 접기" if expanded else "Bastion 모두 펼치기")
+        self.bastion_rows.blockSignals(False)
+
+    def export_current_package(self):
+        def action():
+            self.grid.commit_editor()
+            rows = self.grid.rows() if self.pages.currentIndex() == 1 else [{**self.single_form.get_row(), "host": self.host.text()}]
+            self.export_package_rows(rows)
+        self.perform(action)
+
+    def export_package_rows(self, rows):
+        rows = core.validate_batch(rows, check_keys=True)
+        path, _ = QFileDialog.getSaveFileName(self, "연결 내보내기 — 키 파일 포함", "연결.mobaquick.zip", "연결 묶음 (*.mobaquick.zip *.zip)")
+        if path:
+            result = portable.export_bundle(path, rows, self.store.state["favorite_keys"], overwrite=True)
+            self.set_status(f"연결 {result['connections']}개와 키 {result['keys']}개를 내보냈습니다.")
+
+    def import_package(self):
+        if self.registration_thread is not None:
+            self.set_status("세션 추가가 끝난 뒤 가져오세요.")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "연결 가져오기", "", "연결 묶음 (*.mobaquick.zip *.zip);;모든 파일 (*)")
+        if not path:
+            return
+        def action():
+            bundle = portable.read_bundle(path)
+            text = f"연결 {len(bundle.rows)}개와 키 {len(bundle.keys)}개를 가져올까요?\n현재 입력 표를 바꿉니다. 키는 이 PC에 보관됩니다."
+            if QMessageBox.question(self, "연결 가져오기", text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+                return
+            rows = portable.install_bundle(bundle, self.store)
+            self.grid.remember()
+            self.grid.bastion_visible = False
+            self.grid.expanded_rows.clear()
+            self.grid.set_rows(rows)
+            self.key_library.changed.emit()
+            self.select_page(1)
+            self.set_status(f"연결 {len(rows)}개를 가져왔습니다. 확인 후 일괄 추가하세요.")
+        self.perform(action)
 
     def make_settings(self):
         page = QWidget()
@@ -895,7 +1149,7 @@ class MainWindow(QMainWindow):
         shell, box = card()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        self.settings_form = ConnectionForm()
+        self.settings_form = ConnectionForm(key_library=self.key_library)
         self.settings_form.fields["name"].setDisabled(True)
         self.settings_form.fields["name"].setPlaceholderText("연결 이름은 IP로 자동 생성")
         scroll.setWidget(self.settings_form)
@@ -918,6 +1172,11 @@ class MainWindow(QMainWindow):
         self.profiles.setCurrentText(self.store.state["active_profile"])
         self.profiles.blockSignals(False)
         self.apply_single_defaults()
+
+    def manage_keys(self):
+        dialog = FavoriteKeysDialog(self.key_library, self)
+        dialog.exec()
+        dialog.deleteLater()
 
     def change_profile(self, name):
         if not name:
@@ -1157,6 +1416,10 @@ class MainWindow(QMainWindow):
             self.host.selectAll()
 
     def escape(self):
+        for picker in self.findChildren(KeyPicker):
+            if picker.combo.completer().popup().isVisible():
+                picker.combo.completer().popup().hide()
+                return
         if self.grid.drag_seed:
             self.grid.cancel_fill()
         else:

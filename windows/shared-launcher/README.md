@@ -17,6 +17,13 @@ identity in new pending records, and local `lifecycle.jsonl` events. A persisten
 `session-run.lock` filename is normal; the open OS handle determines ownership.
 Do not delete that file to bypass an active publisher.
 
+A repeated click now restores the existing window for the same `-i` profile.
+Startup/saving contention is handled without an error dialog. A busy request
+waits up to four seconds to inherit a released lease before deferring. Startup
+attempt records distinguish new contenders from actual publishers using exact
+CIM process creation timestamps; they are local coordination metadata, not an
+authentication boundary. Genuine I/O errors and unpublished edits remain errors.
+
 On startup, an old pending record can be archived automatically only when:
 
 - No MobaXterm app or shared-session publisher is active.

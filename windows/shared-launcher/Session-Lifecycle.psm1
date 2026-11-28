@@ -9,7 +9,12 @@ function Get-MobaFileHash([string]$Path) {
 function Enter-MobaRunLock([string]$Directory) {
     [IO.Directory]::CreateDirectory($Directory)|Out-Null
     try {return [IO.File]::Open((Join-Path $Directory 'session-run.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
-    catch [IO.IOException] {throw 'The shared-session launcher is still saving or starting. Try again in a moment.'}
+    catch [IO.IOException] {
+        if(($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32,33)){throw}
+        $busy=[InvalidOperationException]::new('The shared-session launcher is still saving or starting. Try again in a moment.')
+        $busy.Data['MobaLauncherBusy']=$true
+        throw $busy
+    }
 }
 
 function Test-MobaPublisherCommand([string]$CommandLine,[string]$LauncherPath) {
@@ -30,12 +35,44 @@ function Test-MobaPublisherCommand([string]$CommandLine,[string]$LauncherPath) {
     return $true
 }
 
-function Get-MobaOwners([string]$LauncherPath) {
+function Register-MobaAttempt([string]$Directory) {
+    $attempts=Join-Path $Directory 'launch-attempts'
+    [IO.Directory]::CreateDirectory($attempts)|Out-Null
+    $path=Join-Path $attempts ($PID.ToString()+'.json')
+    Import-MobaCim
+    $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID) -ErrorAction Stop
+    $record=@{schema=1;kind='moba-launch-attempt';pid=$PID;startedUtc=$process.CreationDate.ToUniversalTime().ToString('o');stage='contender'}
+    [IO.File]::WriteAllText($path,($record|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+    return $path
+}
+
+function Set-MobaAttemptPublishing([string]$Path) {
+    $record=[IO.File]::ReadAllText($Path)|ConvertFrom-Json
+    if($record.pid -ne $PID){throw 'Launch attempt ownership changed.'}
+    $record.stage='publisher'
+    [IO.File]::WriteAllText($Path,($record|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+}
+
+function Test-MobaContender($Process,[string]$Directory) {
+    if(-not $Directory){return $false}
+    try{
+        $path=Join-Path $Directory (([int]$Process.ProcessId).ToString()+'.json')
+        $record=[IO.File]::ReadAllText($path)|ConvertFrom-Json
+        return $record.schema -eq 1 -and $record.kind -eq 'moba-launch-attempt' -and $record.stage -eq 'contender' -and
+            $record.pid -eq $Process.ProcessId -and [DateTime]::Parse($record.startedUtc).ToUniversalTime().Ticks -eq $Process.CreationDate.ToUniversalTime().Ticks
+    }catch{return $false}
+}
+
+function Import-MobaCim {
     # Import the Windows-native CIM module, avoiding inherited PowerShell 7 paths.
     if($PSVersionTable.PSVersion.Major -eq 5){
         $module=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules\CimCmdlets\CimCmdlets.psd1'
         Import-Module $module -ErrorAction Stop
     }
+}
+
+function Get-MobaOwners([string]$LauncherPath,[string]$IgnoreContendersIn='') {
+    Import-MobaCim
     $all=@(Get-CimInstance Win32_Process -ErrorAction Stop)
     $ancestors=@{};$cursor=[int]$PID
     while($cursor -gt 0 -and -not $ancestors.ContainsKey($cursor)){
@@ -46,7 +83,7 @@ function Get-MobaOwners([string]$LauncherPath) {
     $apps=@($all|Where-Object {$_.Name -like 'MobaXterm*'})
     $workers=@($all|Where-Object {
         -not $ancestors.ContainsKey([int]$_.ProcessId) -and $_.Name -match '^(powershell|pwsh)\.exe$' -and
-        (Test-MobaPublisherCommand ([string]$_.CommandLine) $LauncherPath)
+        (Test-MobaPublisherCommand ([string]$_.CommandLine) $LauncherPath) -and -not (Test-MobaContender $_ $IgnoreContendersIn)
     })
     return [pscustomobject]@{Apps=$apps.Count;Publishers=$workers.Count}
 }
@@ -55,6 +92,56 @@ function Write-MobaLifecycle([string]$Directory,[string]$Event,[hashtable]$Detai
     $record=@{utc=[DateTime]::UtcNow.ToString('o');event=$Event;publisherPid=$PID}
     foreach($key in $Details.Keys){$record[$key]=$Details[$key]}
     [IO.File]::AppendAllText((Join-Path $Directory 'lifecycle.jsonl'),($record|ConvertTo-Json -Depth 4 -Compress)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+}
+
+function Write-MobaActivationEvent([string]$Directory,[string]$Event) {
+    # A second click must not become an error if the publisher is appending its
+    # own lifecycle event at exactly the same instant.
+    try{if([IO.Directory]::Exists($Directory)){Write-MobaLifecycle $Directory $Event}}catch{}
+}
+
+function Invoke-MobaExistingInstance {
+    param([string]$Directory,[string]$LauncherPath,[string]$IniPath,[scriptblock]$OwnerProbe,[scriptblock]$Activator)
+    $owners=if($OwnerProbe){& $OwnerProbe}else{Get-MobaOwners $LauncherPath}
+    if(-not ($owners.Apps -or $owners.Publishers)){return $false}
+    if($owners.Apps){
+        if($Activator){& $Activator|Out-Null}else{
+            try{
+                if(-not ('MobaQuickConnect.NativeActivation' -as [type])){
+                    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace MobaQuickConnect {
+ public static class NativeActivation {
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern bool FlashWindow(IntPtr hWnd, bool invert);
+  public static void Show(IntPtr handle) {
+   ShowWindowAsync(handle, IsIconic(handle) ? 9 : 5);
+   if (!SetForegroundWindow(handle)) FlashWindow(handle, true);
+  }
+ }
+}
+'@
+                }
+                $windows=@([Diagnostics.Process]::GetProcesses()|Where-Object {$_.ProcessName -like 'MobaXterm*' -and $_.MainWindowHandle -ne [IntPtr]::Zero})
+                if($IniPath){
+                    $matching=@(Get-CimInstance Win32_Process|Where-Object {
+                        $m=[regex]::Match([string]$_.CommandLine,'(?i)(?:^|\s)-i\s+(?:"(?<ini>[^"]+)"|(?<ini>[^\s]+))')
+                        $_.Name -like 'MobaXterm*' -and $m.Success -and [string]::Equals([IO.Path]::GetFullPath($m.Groups['ini'].Value),[IO.Path]::GetFullPath($IniPath),[StringComparison]::OrdinalIgnoreCase)
+                    }|ForEach-Object {$_.ProcessId})
+                    $windows=@($windows|Where-Object {$_.Id -in $matching})
+                }
+                # Prefer this portable install if several Moba installations run.
+                $preferred=@($windows|Where-Object {try{[IO.Path]::GetDirectoryName($_.MainModule.FileName) -ieq [IO.Path]::GetDirectoryName($LauncherPath)}catch{$false}})
+                if($preferred.Count){$windows=$preferred}
+                if($windows.Count){[MobaQuickConnect.NativeActivation]::Show($windows[0].MainWindowHandle)}
+            }catch{} # Startup/exit races are ordinary second-click conditions.
+        }
+        Write-MobaActivationEvent $Directory 'existing-application-requested'
+    }else{Write-MobaActivationEvent $Directory 'activation-deferred-publisher-active'}
+    return $true
 }
 
 function Test-MobaRecordedOwner($Record) {
@@ -95,7 +182,7 @@ function Recover-MobaUnchangedPending {
     $pending=Join-Path $Directory 'pending-edit.json'
     if(-not [IO.File]::Exists($pending)){return $null}
     $view=Join-Path $Directory 'sessions-local.mxtsessions';$ini=Join-Path $Directory 'MobaXterm.ini'
-    $probe={Get-MobaOwners $LauncherPath}
+    $probe={Get-MobaOwners $LauncherPath -IgnoreContendersIn (Join-Path $Directory 'launch-attempts')}
     if($OwnerProbe){$probe=$OwnerProbe}
     $owners=& $probe
     if($owners.Apps -or $owners.Publishers){throw 'A MobaXterm application or publisher is active. Pending edit was preserved.'}
@@ -129,4 +216,4 @@ function Recover-MobaUnchangedPending {
     return $archive
 }
 
-Export-ModuleMember -Function Get-MobaFileHash,Enter-MobaRunLock,Get-MobaOwners,Write-MobaLifecycle,Recover-MobaUnchangedPending,Test-MobaPublisherCommand
+Export-ModuleMember -Function Get-MobaFileHash,Enter-MobaRunLock,Get-MobaOwners,Write-MobaLifecycle,Recover-MobaUnchangedPending,Test-MobaPublisherCommand,Invoke-MobaExistingInstance,Write-MobaActivationEvent,Register-MobaAttempt,Set-MobaAttemptPublishing

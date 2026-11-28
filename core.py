@@ -6,6 +6,7 @@ import csv
 import io
 import ipaddress
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ import uuid
 
 from vendor import mobaxterm_sessions as codec
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 FIELDS = ("host", "protocol", "name", "user", "port", "key_path", "folder",
           "bastion_host", "bastion_user", "bastion_port", "bastion_key_path")
 HEADERS = ("접속 IP", "방식", "연결 이름", "사용자", "포트", "SSH 키 경로", "저장 폴더",
@@ -31,7 +32,12 @@ DEFAULTS = {
 
 def default_state():
     return {"version": 1, "moba_exe": "", "active_profile": "기본 설정",
-            "profiles": {"기본 설정": copy.deepcopy(DEFAULTS)}, "connections": []}
+            "profiles": {"기본 설정": copy.deepcopy(DEFAULTS)}, "connections": [], "favorite_keys": []}
+
+
+def key_identity(path):
+    expanded = os.path.expandvars(os.path.expanduser(str(path).strip()))
+    return ntpath.normcase(ntpath.normpath(os.path.abspath(expanded)))
 
 
 def local_root():
@@ -201,12 +207,60 @@ class Store:
                         profile[kind] = {**DEFAULTS[kind], **profile.get(kind, {})}
                 if self.state["active_profile"] not in self.state["profiles"]:
                     self.state["active_profile"] = next(iter(self.state["profiles"]))
+                favorites = self.state["favorite_keys"]
+                if not isinstance(favorites, list) or any(
+                    not isinstance(item, dict) or not isinstance(item.get("name"), str) or
+                    not isinstance(item.get("path"), str) or not item["name"].strip() or
+                    not item["path"].strip() for item in favorites
+                ):
+                    raise ValueError("invalid favorite key data")
             except (ValueError, KeyError, TypeError):
                 raise ValueError("기본값 파일을 읽을 수 없습니다. 기존 파일은 보존했습니다.") from None
 
     @property
     def profile(self):
         return self.state["profiles"][self.state["active_profile"]]
+
+    def favorite_key(self, path):
+        identity = key_identity(path)
+        return next((item for item in self.state["favorite_keys"] if key_identity(item["path"]) == identity), None)
+
+    def add_favorite_key(self, path, name=None):
+        path = safe_text(path, "SSH 키 경로")
+        if not path:
+            raise ValueError("키 파일을 선택하세요.")
+        path = os.path.normpath(os.path.abspath(os.path.expandvars(os.path.expanduser(path))))
+        if not Path(path).is_file():
+            raise ValueError("키 파일을 찾을 수 없습니다. 경로를 확인하세요.")
+        if self.favorite_key(path):
+            return False
+        name = self.favorite_key_name(name if name is not None else ntpath.basename(path))
+        self._save_favorites([*self.state["favorite_keys"], {"name": name, "path": path}])
+        return True
+
+    @staticmethod
+    def favorite_key_name(name):
+        name = str(name).strip()
+        if not name or len(name) > 80 or any(ord(c) < 32 for c in name):
+            raise ValueError("키 이름은 1~80자로 입력하세요.")
+        return name
+
+    def rename_favorite_key(self, path, name):
+        name = self.favorite_key_name(name)
+        self._save_favorites([{**item, "name": name} if key_identity(item["path"]) == key_identity(path) else item
+                              for item in self.state["favorite_keys"]])
+
+    def remove_favorite_key(self, path):
+        self._save_favorites([item for item in self.state["favorite_keys"] if key_identity(item["path"]) != key_identity(path)])
+
+    def _save_favorites(self, favorites):
+        previous = self.state["favorite_keys"]
+        self.state["favorite_keys"] = favorites
+        try:
+            self.save()
+        except Exception:
+            self.state["favorite_keys"] = previous
+            raise
 
     def save(self):
         raw = json.dumps(self.state, ensure_ascii=False, indent=2).encode("utf-8")

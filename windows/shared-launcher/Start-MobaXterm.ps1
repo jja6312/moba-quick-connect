@@ -29,12 +29,37 @@ if($ValidateOnly){
     @{SourceSHA256=(Get-ByteHash $initial);DeviceDirectory=$localDir;ResolvedKeyFields=$view.Resolved;PendingKeyFields=$view.Pending;SharedINI=$template;LocalINI=$iniPath}|ConvertTo-Json
     return
 }
-$runLock=Enter-MobaRunLock $localDir
+if(-not $PrepareOnly){$attempt=Register-MobaAttempt $localDir}
+$runLock=$null
+$activationDeadline=[DateTime]::UtcNow.AddSeconds(4)
+while($null -eq $runLock){
+    try{$runLock=Enter-MobaRunLock $localDir}catch{
+        if(-not $PrepareOnly -and $_.Exception.Data['MobaLauncherBusy']){
+            $owners=Get-MobaOwners $PSCommandPath
+            if($owners.Apps){
+                $null=Invoke-MobaExistingInstance -Directory $localDir -LauncherPath $PSCommandPath -IniPath $iniPath -OwnerProbe {$owners}
+                return
+            }
+            if([DateTime]::UtcNow -ge $activationDeadline){
+                Write-MobaActivationEvent $localDir 'activation-deferred-lock-busy'
+                return
+            }
+            Start-Sleep -Milliseconds 150
+            continue
+        }
+        throw
+    }
+}
 try {
-    $owners=Get-MobaOwners $PSCommandPath
-    if($owners.Apps -or $owners.Publishers){throw 'MobaXterm or its shared-session publisher is active. No files were replaced.'}
     if($PrepareOnly -and [IO.File]::Exists($pendingPath)){throw 'An unfinished edit must be preserved during preparation.'}
+    $owners=Get-MobaOwners $PSCommandPath -IgnoreContendersIn (Join-Path $localDir 'launch-attempts')
+    if($owners.Apps -or $owners.Publishers){
+        if($PrepareOnly){throw 'MobaXterm or its shared-session publisher is active. No files were replaced.'}
+        $null=Invoke-MobaExistingInstance -Directory $localDir -LauncherPath $PSCommandPath -IniPath $iniPath -OwnerProbe {$owners}
+        return
+    }
     if(-not $PrepareOnly){$null=Recover-MobaUnchangedPending -Directory $localDir -Source $source -LauncherPath $PSCommandPath}
+    if(-not $PrepareOnly){Set-MobaAttemptPublishing $attempt}
     # Re-read the latest canonical source AFTER recovery and acquiring the lease.
     $initial=[IO.File]::ReadAllBytes($source);$initialHash=Get-ByteHash $initial
     $cacheMap=@{}
