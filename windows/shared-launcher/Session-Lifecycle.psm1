@@ -110,6 +110,7 @@ function Invoke-MobaExistingInstance {
                 if(-not ('MobaQuickConnect.NativeActivation' -as [type])){
                     Add-Type -TypeDefinition @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 namespace MobaQuickConnect {
  public static class NativeActivation {
@@ -122,12 +123,19 @@ namespace MobaQuickConnect {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
   [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextLength(IntPtr window);
+  [StructLayout(LayoutKind.Sequential)] struct Rect { public int left,top,right,bottom; }
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window,out Rect rectangle);
   public static void ShowProcess(int pid) {
    IntPtr found=IntPtr.Zero;
+   long bestArea=0;
    EnumWindows(delegate(IntPtr window, IntPtr state) {
     uint owner; GetWindowThreadProcessId(window,out owner);
     if(owner==(uint)pid && GetWindow(window,4)==IntPtr.Zero && GetWindowTextLength(window)>0) {
-     found=window; return false;
+     Rect bounds;
+     if(GetWindowRect(window,out bounds)) {
+      long area=(long)(bounds.right-bounds.left)*(bounds.bottom-bounds.top);
+      if(area>bestArea) { bestArea=area; found=window; }
+     }
     }
     return true;
    },IntPtr.Zero);
